@@ -90,6 +90,33 @@ export async function acceptAnswer(code) {
   if (!S.pending) throw new Error('Show your own code first, then scan the reply.');
   await S.pending.setRemoteDescription({ type: 'answer', sdp: await unpack(code.slice(4)) }); S.pending = null;
 }
+/* ---------- nearby links: Bluetooth and Wi-Fi, found automatically (Android app only) ---------- */
+const NB = { plugin: window.Capacitor ? window.capacitorExports?.registerPlugin?.('Nearby') : null, on: false, wired: false, links: new Map(), parts: new Map(), note: '' };
+function nbLink(ep) {
+  const dc = { readyState: 'open', bufferedAmount: 0,
+    send(s) { const n = Math.ceil(s.length / 9000) || 1, k = rid(4); for (let i = 0; i < n; i++) NB.plugin.send({ endpoint: ep, data: `${k}|${i}|${n}|${s.slice(i * 9000, (i + 1) * 9000)}` }).catch((e) => console.warn('nearby send failed', e)); },
+    close() { if (this.readyState === 'closed') return; this.readyState = 'closed'; NB.links.delete(ep); NB.plugin.disconnect({ endpoint: ep }).catch(() => {}); } };
+  const link = attach({ connectionState: 'connected', addEventListener() {}, close() {} }, dc); link.nearby = ep; NB.links.set(ep, link); return link;
+}
+function nbData(ep, raw) {   // one message can arrive in several pieces: Bluetooth packets are small
+  const link = NB.links.get(ep); if (!link) return; const a = raw.indexOf('|'), b = raw.indexOf('|', a + 1), c = raw.indexOf('|', b + 1); if (c < 0) return;
+  const k = ep + raw.slice(0, a), i = +raw.slice(a + 1, b), n = +raw.slice(b + 1, c), d = raw.slice(c + 1); let full = d;
+  if (n > 1) { if (!(n <= 64)) return; const p = NB.parts.get(k) || { got: 0, d: new Array(n) }; NB.parts.set(k, p); if (p.d[i] === undefined) { p.d[i] = d; p.got++; } if (p.got < n) return; NB.parts.delete(k); full = p.d.join(''); }
+  link.dc.onmessage?.({ data: full });
+}
+async function nbStart() {
+  if (!NB.plugin || NB.on || !S.me?.name) return;
+  if (!NB.wired) { NB.wired = true;
+    NB.plugin.addListener('connected', (e) => { nbLink(e.endpoint); render(); });
+    NB.plugin.addListener('disconnected', (e) => { const l = NB.links.get(e.endpoint); NB.links.delete(e.endpoint); if (l) dropLink(l); render(); });
+    NB.plugin.addListener('data', (e) => nbData(e.endpoint, e.data));
+  }
+  try { await NB.plugin.start({ name: S.me.name }); NB.on = true; NB.note = ''; try { localStorage.setItem('nearby', '1'); } catch {} }
+  catch (e) { NB.note = e?.message || 'Nearby linking is not available on this phone.'; }
+  render();
+}
+async function nbStop() { NB.on = false; try { localStorage.removeItem('nearby'); } catch {} for (const l of [...NB.links.values()]) dropLink(l); try { await NB.plugin.stop(); } catch {} render(); }
+
 function dropLink(link) {
   if (link.dead) return; link.dead = true; try { link.dc.close(); link.pc.close(); } catch {}
   if (link.id && S.links.get(link.id) === link) {
@@ -235,6 +262,8 @@ function render() {
   $('mesh-setup').hidden = !!S.me.name; $('mesh-home').hidden = !S.me.name || !!S.open; $('mesh-convo').hidden = !S.open;
   if (!S.me.name) return;
   $('mesh-me').textContent = `${S.me.name} · ${S.links.size === 0 ? 'no phones linked' : S.links.size === 1 ? '1 phone linked' : S.links.size + ' phones linked'}`;
+  $('mesh-nearby-box').hidden = !NB.plugin; $('mesh-nearby').textContent = NB.on ? 'Stop nearby linking' : 'Find nearby phones';
+  $('mesh-nearby-note').textContent = NB.note || (NB.on ? `Looking for phones nearby that have Internot AI open. ${NB.links.size} linked this way.` : 'Links by itself with phones close by, over Bluetooth or shared Wi‑Fi. No internet and no codes.');
   const list = $('mesh-people'); list.textContent = '';
   const people = [...S.contacts.values()].sort((a, b) => (reach(b.id) !== 'none') - (reach(a.id) !== 'none') || a.name.localeCompare(b.name));
   for (const c of people) {
@@ -265,6 +294,7 @@ function render() {
 function wire() {
   $('mesh-name-save').onclick = async () => { const n = $('mesh-name').value.trim().slice(0, 40); if (!n) return; S.me.name = n; await writeJSON('mesh-id.json', S.me); render(); };
   $('mesh-link-open').onclick = openLink; $('link-close').onclick = closeLink;
+  $('mesh-nearby').onclick = () => (NB.on ? nbStop() : nbStart());
   $('link-show').onclick = async () => { stopScan(); linkStatus('Making your code…'); try { showCode(await makeOffer()); linkStatus('Let the other phone scan this. Then tap “Scan a code” here to read its reply.'); } catch (e) { linkStatus('Could not make a code on this phone: ' + (e?.message || e), true); } };
   $('link-scan').onclick = startScan;
   $('link-use').onclick = () => { stopScan(); useCode($('link-paste').value); };
@@ -286,6 +316,8 @@ export async function initMesh(root, onUnread) {
   for (const c of saved.contacts) S.contacts.set(c.id, c);
   S.msgs = saved.msgs; for (const m of S.msgs) S.seen.add(m.mid);
   wire(); render();
-  window.internotMesh = { S, makeOffer, acceptOffer, acceptAnswer, send, drawQR, readQR, reach };
+  window.internotMesh = { S, NB, makeOffer, acceptOffer, acceptAnswer, send, drawQR, readQR, reach, nbLink, nbData };
+  let auto = false; try { auto = !!localStorage.getItem('nearby'); } catch {}
+  if (auto) nbStart();
 }
 export const meshShown = () => { if (S.open) { S.unread.delete(S.open); } render(); };

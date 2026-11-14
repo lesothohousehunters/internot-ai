@@ -104,6 +104,7 @@ function setProgress(frac, label) {
 // A ready-made country map that ships with the app (inside the Android app, or beside the web app).
 const BUILT_IN = './maps/lesotho.imap';
 const NATIVE = !!window.Capacitor;
+const TTS = NATIVE ? window.capacitorExports?.registerPlugin?.('TextToSpeech') : null;
 let builtIn = null;
 function builtInAvailable() { return builtIn ||= fetch(BUILT_IN, { method: 'HEAD' }).then((r) => r.ok && !/html/.test(r.headers.get('content-type') || ''), () => false); }
 async function useBuiltIn() {   // Android app: the file is already on the phone, so read it in place
@@ -347,9 +348,14 @@ function makeRoute(from, to) {
 }
 
 /* ---------- GPS and navigation ---------- */
+function hush() { try { if (TTS) TTS.stop().catch(() => {}); else speechSynthesis?.cancel(); } catch {} }
 function speak(text) {
-  M.spoken.push(text);
-  if (M.mute || !('speechSynthesis' in window)) return;
+  M.spoken.push(text); if (M.mute) return;
+  if (TTS) {   // Android app: the phone's own text-to-speech voice, which works with no internet
+    TTS.speak({ text, lang: 'en-US', rate: 0.95, queueStrategy: 1 }).catch((e) => { console.warn('voice failed', e); if (!M.voiceWarned) { M.voiceWarned = true; msg('Voice is not available. Switch on a text-to-speech voice in the phone settings.'); } });
+    return;
+  }
+  if (!('speechSynthesis' in window)) return;
   try { const u = new SpeechSynthesisUtterance(text); u.lang = 'en'; u.rate = 0.95; speechSynthesis.speak(u); } catch {}
 }
 function ensureGps() {
@@ -426,7 +432,7 @@ function directions() {
 function renderSheet() {
   const sheet = $('map-sheet'); sheet.textContent = ''; const row = document.createElement('div'); row.className = 'row wrap';
   const title = document.createElement('div'); title.className = 'sheet-title';
-  if (M.nav) { sheet.hidden = false; row.append(button('End navigation', 'danger', () => endNav(false)), button(M.mute ? 'Voice off' : 'Voice on', '', () => { M.mute = !M.mute; if (M.mute) speechSynthesis?.cancel(); renderSheet(); })); sheet.append(row); return; }
+  if (M.nav) { sheet.hidden = false; row.append(button('End navigation', 'danger', () => endNav(false)), button(M.mute ? 'Voice off' : 'Voice on', '', () => { M.mute = !M.mute; if (M.mute) hush(); renderSheet(); })); sheet.append(row); return; }
   if (M.route) {
     const r = M.route; title.textContent = `${fmtDist(r.total)} · ${fmtTime(r.secs)}`;
     row.append(button('Start', 'primary', startNav), button('Clear', '', () => { clearRoute(); M.dest = null; M.start = null; M.pick = null; renderSheet(); draw(); }));
@@ -507,4 +513,5 @@ export async function initMaps(root) {
   renderMapInfo();
 }
 M.api = { makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint };
+M.api.speakTest = async (text) => { if (!TTS) return { native: false, web: 'speechSynthesis' in window }; const l = await TTS.getSupportedLanguages().catch((e) => ({ error: String(e) })); const said = await Promise.race([TTS.speak({ text, lang: 'en-US' }).then(() => 'spoken', (e) => 'failed: ' + (e?.message || e)), new Promise((r) => setTimeout(() => r('timeout'), 9000))]); return { native: true, languages: l.languages ? l.languages.length : l, said }; };
 export const mapShown = () => resize();

@@ -150,6 +150,8 @@ async function ensureLoaded() {
     if (!blob) throw new Error('NO_MODEL');
     setStatus('Waking The Brain…', 'busy');
     state.wllama = new Wllama({ default: './lib/wllama/wllama.wasm' }, { suppressNativeLog: true, allowOffline: true });
+    // Older phones: a second, slower build of the engine that the library switches to by itself when it has to.
+    const at = (p) => new URL(p, location.href).href; state.wllama.setCompat({ worker: at('./lib/wllama/compat/wllama.js'), wasm: at('./lib/wllama/compat/wllama.wasm') });
     // Half the cores, at most four: the small cores on phone chips slow everything down when they join in.
     const cores = navigator.hardwareConcurrency || 4; const n_threads = Math.max(1, Math.min(4, cores > 4 ? cores >> 1 : cores));
     await state.wllama.loadModel([blob], { n_ctx: 2048, n_threads, n_gpu_layers: state.settings.gpu ? 99 : 0 });
