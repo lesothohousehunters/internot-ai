@@ -1,0 +1,84 @@
+name: Build Android APKs
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['internot-ai-v0.4/**', 'android/**', 'update/**', '.github/workflows/build-android.yml']
+permissions:
+  contents: write
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Apply update and build map data
+        run: |
+          git config user.name "internot-build"
+          git config user.email "internot-build@users.noreply.github.com"
+          for p in update/*.patch; do
+            [ -f "$p" ] || continue
+            git apply --unidiff-zero --whitespace=nowarn "$p"
+            git rm -q -f "$p"
+          done
+          A=internot-ai-v0.4
+          if [ ! -f $A/world.json ]; then
+            N=https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson
+            curl -fL -o /tmp/c.json $N/ne_50m_admin_0_countries.geojson
+            curl -fL -o /tmp/p.json $N/ne_50m_populated_places_simple.geojson
+            node $A/tools-build-world.mjs /tmp/c.json /tmp/p.json $A/world.json
+          fi
+          if [ ! -f $A/maps/lesotho.imap ]; then
+            mkdir -p $A/maps
+            curl -fL -o /tmp/l.pbf https://download.geofabrik.de/africa/lesotho-latest.osm.pbf
+            ls -la /tmp/l.pbf
+            node $A/tools-build-map.mjs /tmp/l.pbf $A/maps/lesotho.imap Lesotho
+          fi
+          ls -la $A $A/maps
+          test $(stat -c %s $A/maps/lesotho.imap) -lt 95000000
+          git add -A
+          git diff --cached --quiet || { git commit -m "Update app and built-in map data"; git push; }
+      - name: Lite APK (app, world map and Lesotho map)
+        run: |
+          mkdir build && cd build
+          npm init -y
+          npm i @capacitor/core@8 @capacitor/cli@8 @capacitor/android@8
+          mkdir www && cp -r ../internot-ai-v0.4/. www/
+          rm -f www/sw.js www/README.md www/tools-build-map.mjs www/tools-build-world.mjs
+          npx cap init "Internot AI" org.internot.app --web-dir www
+          npx cap add android
+          M=android/app/src/main/AndroidManifest.xml
+          P='<uses-permission android:name="android.permission.'
+          sed -i "s#<application#${P}CAMERA\"/>${P}ACCESS_FINE_LOCATION\"/>${P}ACCESS_COARSE_LOCATION\"/>${P}WAKE_LOCK\"/>${P}CHANGE_WIFI_MULTICAST_STATE\"/><uses-feature android:name=\"android.hardware.camera\" android:required=\"false\"/><application#" $M
+          sed -i 's#^android {#android {\n    androidResources { noCompress += ["gguf", "imap"] }#' android/app/build.gradle
+          R=android/app/src/main/res
+          rm -rf $R/mipmap-anydpi-v26
+          for d in $R/mipmap-*; do cp www/icon-512.png $d/ic_launcher.png; cp www/icon-512.png $d/ic_launcher_round.png; rm -f $d/ic_launcher_foreground.png; done
+          npx cap sync android
+          (cd android && ./gradlew assembleDebug --no-daemon)
+          cp android/app/build/outputs/apk/debug/app-debug.apk ../internot-ai.apk
+      - name: Full APK (AI model inside as well)
+        run: |
+          cd build && mkdir www/bundled
+          curl -fL -o www/bundled/model.gguf https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf
+          cp ../android/bundled.js www/
+          sed -i 's#<script type="module" src="app.js"></script>#<script src="bundled.js"></script><script type="module" src="app.js"></script>#' www/index.html
+          grep -c bundled.js www/index.html
+          node -e "const fs=require('fs');fs.writeFileSync('www/bundled/list.json',JSON.stringify([{label:'AI model',file:'model.gguf',to:'model.gguf',size:fs.statSync('www/bundled/model.gguf').size,meta:'model.json',name:'Qwen2.5 0.5B (built in)'}]))"
+          cat www/bundled/list.json
+          npx cap sync android
+          (cd android && ./gradlew assembleDebug --no-daemon)
+          cp android/app/build/outputs/apk/debug/app-debug.apk ../internot-ai-full.apk
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la *.apk
+          gh release delete latest -y --cleanup-tag || true
+          gh release create latest internot-ai-full.apk internot-ai.apk --title "Internot AI for Android" --notes "internot-ai-full.apk: everything inside (AI model, world map, Lesotho street map). Install and use with no internet. internot-ai.apk: the same without the AI model."
