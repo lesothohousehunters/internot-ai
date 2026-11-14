@@ -1,0 +1,383 @@
+diff --git a/android/MainActivity.java b/android/MainActivity.java
+new file mode 100644
+index 0000000..f00a1a0
+--- /dev/null
++++ b/android/MainActivity.java
+@@ -0,0 +1,12 @@
++package org.internot.app;
++
++import android.os.Bundle;
++import com.getcapacitor.BridgeActivity;
++
++public class MainActivity extends BridgeActivity {
++    @Override
++    public void onCreate(Bundle savedInstanceState) {
++        registerPlugin(NearbyPlugin.class);
++        super.onCreate(savedInstanceState);
++    }
++}
+diff --git a/android/NearbyPlugin.java b/android/NearbyPlugin.java
+new file mode 100644
+index 0000000..48138c9
+--- /dev/null
++++ b/android/NearbyPlugin.java
+@@ -0,0 +1,206 @@
++package org.internot.app;
++
++import android.Manifest;
++import android.os.Build;
++import android.os.Handler;
++import android.os.Looper;
++import com.getcapacitor.JSObject;
++import com.getcapacitor.PermissionState;
++import com.getcapacitor.Plugin;
++import com.getcapacitor.PluginCall;
++import com.getcapacitor.PluginMethod;
++import com.getcapacitor.annotation.CapacitorPlugin;
++import com.getcapacitor.annotation.Permission;
++import com.getcapacitor.annotation.PermissionCallback;
++import com.google.android.gms.nearby.Nearby;
++import com.google.android.gms.nearby.connection.AdvertisingOptions;
++import com.google.android.gms.nearby.connection.ConnectionInfo;
++import com.google.android.gms.nearby.connection.ConnectionLifecycleCallback;
++import com.google.android.gms.nearby.connection.ConnectionResolution;
++import com.google.android.gms.nearby.connection.ConnectionsClient;
++import com.google.android.gms.nearby.connection.DiscoveredEndpointInfo;
++import com.google.android.gms.nearby.connection.DiscoveryOptions;
++import com.google.android.gms.nearby.connection.EndpointDiscoveryCallback;
++import com.google.android.gms.nearby.connection.Payload;
++import com.google.android.gms.nearby.connection.PayloadCallback;
++import com.google.android.gms.nearby.connection.PayloadTransferUpdate;
++import com.google.android.gms.nearby.connection.Strategy;
++import java.nio.charset.StandardCharsets;
++import java.util.HashSet;
++import java.util.Set;
++import java.util.UUID;
++
++/**
++ * Links phones that are close to each other with no internet, using Google's Nearby Connections
++ * (Bluetooth, Bluetooth Low Energy and shared Wi-Fi). Every phone both announces itself and looks
++ * for others; connections are accepted automatically because the messages are encrypted by the app.
++ */
++@CapacitorPlugin(
++    name = "Nearby",
++    permissions = {
++        @Permission(alias = "location", strings = { Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION }),
++        @Permission(alias = "bluetooth", strings = { "android.permission.BLUETOOTH_SCAN", "android.permission.BLUETOOTH_ADVERTISE", "android.permission.BLUETOOTH_CONNECT" }),
++        @Permission(alias = "wifi", strings = { "android.permission.NEARBY_WIFI_DEVICES" })
++    }
++)
++public class NearbyPlugin extends Plugin {
++
++    private static final String SERVICE = "org.internot.mesh";
++    private final String token = UUID.randomUUID().toString().substring(0, 8);
++    private final Set<String> asked = new HashSet<>();
++    private final Handler handler = new Handler(Looper.getMainLooper());
++    private ConnectionsClient client;
++    private boolean running = false;
++
++    private String[] needed() {
++        if (Build.VERSION.SDK_INT >= 33) return new String[] { "location", "bluetooth", "wifi" };
++        if (Build.VERSION.SDK_INT >= 31) return new String[] { "location", "bluetooth" };
++        return new String[] { "location" };
++    }
++
++    private boolean granted() {
++        for (String alias : needed()) if (getPermissionState(alias) != PermissionState.GRANTED) return false;
++        return true;
++    }
++
++    @PluginMethod
++    public void start(PluginCall call) {
++        if (!granted()) {
++            requestPermissionForAliases(needed(), call, "afterPermission");
++            return;
++        }
++        begin(call);
++    }
++
++    @PermissionCallback
++    private void afterPermission(PluginCall call) {
++        if (granted()) begin(call);
++        else call.reject("Permission was not given. Allow Nearby devices and Location for Internot AI in the phone settings.");
++    }
++
++    private void begin(final PluginCall call) {
++        if (running) {
++            call.resolve();
++            return;
++        }
++        try {
++            if (client == null) client = Nearby.getConnectionsClient(getContext());
++            final String name = token + "|" + call.getString("name", "Internot");
++            final Strategy strategy = Strategy.P2P_CLUSTER;
++            client
++                .startAdvertising(name, SERVICE, lifecycle, new AdvertisingOptions.Builder().setStrategy(strategy).build())
++                .addOnSuccessListener(a ->
++                    client
++                        .startDiscovery(SERVICE, discovery, new DiscoveryOptions.Builder().setStrategy(strategy).build())
++                        .addOnSuccessListener(d -> {
++                            running = true;
++                            call.resolve();
++                        })
++                        .addOnFailureListener(e -> {
++                            client.stopAdvertising();
++                            call.reject("Could not look for nearby phones: " + e.getMessage());
++                        })
++                )
++                .addOnFailureListener(e -> call.reject("Nearby linking could not start on this phone: " + e.getMessage()));
++        } catch (Exception e) {
++            call.reject("Nearby linking is not available on this phone: " + e.getMessage());
++        }
++    }
++
++    @PluginMethod
++    public void stop(PluginCall call) {
++        if (client != null) {
++            client.stopAdvertising();
++            client.stopDiscovery();
++            client.stopAllEndpoints();
++        }
++        running = false;
++        asked.clear();
++        call.resolve();
++    }
++
++    @PluginMethod
++    public void send(final PluginCall call) {
++        String endpoint = call.getString("endpoint");
++        String data = call.getString("data");
++        if (client == null || endpoint == null || data == null) {
++            call.reject("Not linked");
++            return;
++        }
++        client
++            .sendPayload(endpoint, Payload.fromBytes(data.getBytes(StandardCharsets.UTF_8)))
++            .addOnSuccessListener(v -> call.resolve())
++            .addOnFailureListener(e -> call.reject(e.getMessage()));
++    }
++
++    @PluginMethod
++    public void disconnect(PluginCall call) {
++        String endpoint = call.getString("endpoint");
++        if (client != null && endpoint != null) client.disconnectFromEndpoint(endpoint);
++        call.resolve();
++    }
++
++    private void emit(String event, String endpoint, String data) {
++        JSObject o = new JSObject();
++        o.put("endpoint", endpoint);
++        if (data != null) o.put("data", data);
++        notifyListeners(event, o);
++    }
++
++    private void connect(final String endpointId, final int triesLeft) {
++        if (!running || client == null) return;
++        client
++            .requestConnection(token, endpointId, lifecycle)
++            .addOnFailureListener(e -> {
++                if (triesLeft > 0 && asked.contains(endpointId)) handler.postDelayed(() -> connect(endpointId, triesLeft - 1), 3000);
++                else asked.remove(endpointId);
++            });
++    }
++
++    private final PayloadCallback payloads = new PayloadCallback() {
++        @Override
++        public void onPayloadReceived(String endpointId, Payload payload) {
++            byte[] bytes = payload.getType() == Payload.Type.BYTES ? payload.asBytes() : null;
++            if (bytes != null) emit("data", endpointId, new String(bytes, StandardCharsets.UTF_8));
++        }
++
++        @Override
++        public void onPayloadTransferUpdate(String endpointId, PayloadTransferUpdate update) {}
++    };
++
++    private final ConnectionLifecycleCallback lifecycle = new ConnectionLifecycleCallback() {
++        @Override
++        public void onConnectionInitiated(String endpointId, ConnectionInfo info) {
++            client.acceptConnection(endpointId, payloads);
++        }
++
++        @Override
++        public void onConnectionResult(String endpointId, ConnectionResolution result) {
++            if (result.getStatus().isSuccess()) emit("connected", endpointId, null);
++            else asked.remove(endpointId);
++        }
++
++        @Override
++        public void onDisconnected(String endpointId) {
++            asked.remove(endpointId);
++            emit("disconnected", endpointId, null);
++        }
++    };
++
++    private final EndpointDiscoveryCallback discovery = new EndpointDiscoveryCallback() {
++        @Override
++        public void onEndpointFound(String endpointId, DiscoveredEndpointInfo info) {
++            String other = info.getEndpointName();
++            int bar = other.indexOf('|');
++            String theirs = bar > 0 ? other.substring(0, bar) : other;
++            // Only the phone with the smaller token asks, so two requests never cross.
++            if (token.compareTo(theirs) >= 0 || !asked.add(endpointId)) return;
++            connect(endpointId, 3);
++        }
++
++        @Override
++        public void onEndpointLost(String endpointId) {
++            asked.remove(endpointId);
++        }
++    };
++}
+diff --git a/android/emulator-test.sh b/android/emulator-test.sh
+new file mode 100644
+index 0000000..d0cffcc
+--- /dev/null
++++ b/android/emulator-test.sh
+@@ -0,0 +1,20 @@
++#!/bin/bash
++# Installs the test build on an Android emulator, lets the app test itself, and saves what it reports.
++mkdir -p test-out
++adb install -r internot-ai-test.apk > test-out/install.txt 2>&1 || { echo "INSTALL FAILED" >> test-out/report.txt; cat test-out/install.txt; exit 0; }
++for p in ACCESS_FINE_LOCATION ACCESS_COARSE_LOCATION BLUETOOTH_SCAN BLUETOOTH_ADVERTISE BLUETOOTH_CONNECT NEARBY_WIFI_DEVICES CAMERA; do adb shell pm grant org.internot.app android.permission.$p || true; done
++adb logcat -G 16M || true
++adb logcat -c
++adb shell am start -n org.internot.app/.MainActivity
++adb shell dumpsys package com.google.android.webview | grep -m1 versionName > test-out/webview.txt 2>&1 || true
++seen=0
++for i in $(seq 1 480); do
++  sleep 2
++  adb logcat -d -v time 2>/dev/null | grep -E "INTERNOT-TEST|Capacitor.*(E/|rror)|AndroidRuntime|chromium.*(Uncaught|rror)" | cut -c1-1500 > test-out/report.txt
++  n=$(grep -c "INTERNOT-TEST shot" test-out/report.txt)
++  if [ "$n" -gt "$seen" ]; then seen=$n; sleep 2; adb exec-out screencap -p > test-out/shot-$n.png; fi
++  grep -q "INTERNOT-TEST done" test-out/report.txt && break
++done
++adb exec-out screencap -p > test-out/shot-end.png
++cat test-out/webview.txt test-out/report.txt
++exit 0
+diff --git a/android/selftest.js b/android/selftest.js
+new file mode 100644
+index 0000000..abb38a3
+--- /dev/null
++++ b/android/selftest.js
+@@ -0,0 +1,37 @@
++// Only in the test build that runs on the emulator during the automatic build. Never shipped.
++(async () => {
++  const log = (k, v) => console.log('INTERNOT-TEST ' + k + ' ' + JSON.stringify(v));
++  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
++  const shot = async (name) => { log('shot', name); await wait(6000); };
++  const tab = (v) => document.querySelector(`.tabs [data-view=${v}]`).click();
++  window.addEventListener('error', (e) => log('jserror', e.message + ' @' + (e.filename || '').split('/').pop() + ':' + e.lineno));
++  window.addEventListener('unhandledrejection', (e) => log('rejection', String(e.reason && e.reason.message || e.reason)));
++  try {
++    log('env', { ua: navigator.userAgent, isolated: self.crossOriginIsolated, webSpeech: 'speechSynthesis' in window, cores: navigator.hardwareConcurrency, memory: navigator.deviceMemory, jspi: 'Suspending' in WebAssembly, core: !!window.capacitorExports, plugins: (window.Capacitor?.PluginHeaders || []).map((h) => h.name) });
++    await shot('first-launch');
++    for (let i = 0; i < 600 && !(window.internot && window.internotMap && window.internotMap.map && window.internotMesh); i++) await wait(500);
++    log('map', { name: internotMap.map?.name, stub: !!internotMap.map?.stub, roads: internotMap.map?.W, world: !!internotMap.world });
++    const t1 = performance.now(); for (let i = 0; i < 600 && internot.modelMeta && !internot.loaded; i++) await wait(500);
++    log('model', { meta: internot.modelMeta, loaded: internot.loaded, loadMs: Math.round(performance.now() - t1), status: document.getElementById('status').textContent });
++    await shot('brain-ready');
++    const t0 = performance.now(); let first = null;
++    document.getElementById('input').value = 'What is the capital of Lesotho?'; document.getElementById('composer').requestSubmit();
++    for (let i = 0; i < 700; i++) { await wait(500); const m = internot.messages.at(-1); if (first == null && m && m.role === 'assistant' && m.content) first = performance.now() - t0; if (!internot.generating && i > 2) break; }
++    const last = internot.messages.at(-1) || {};
++    log('chat', { firstWordMs: first == null ? null : Math.round(first), totalMs: Math.round(performance.now() - t0), role: last.role, answer: (last.content || '').slice(0, 600), status: document.getElementById('status').textContent });
++    await shot('brain-answer');
++    tab('map'); await wait(1500);
++    const find = (n) => internotMap.map.placeList.find((p) => p.lower === n); const a = find('maseru'), b = find('mafeteng');
++    const ok = !!(a && b && internotMap.api.makeRoute(a, b)); if (ok) { internotMap.view.cx = (a.x + b.x) / 2; internotMap.view.cy = (a.y + b.y) / 2; internotMap.view.z = 9.5; internotMap.api.paint(); }
++    log('route', { ok, km: internotMap.route && Math.round(internotMap.route.total / 1000), steps: internotMap.route && internotMap.route.steps.length });
++    await shot('map-route');
++    try { log('voice', await internotMap.api.speakTest('Route ready. Head south on Main South.')); } catch (e) { log('voice', { error: String(e && e.message || e) }); }
++    tab('mesh'); await wait(800);
++    if (!internotMesh.S.me.name) { document.getElementById('mesh-name').value = 'Tester'; document.getElementById('mesh-name-save').click(); await wait(800); }
++    document.getElementById('mesh-nearby').click(); await wait(9000);
++    log('nearby', { plugin: !!internotMesh.NB.plugin, on: internotMesh.NB.on, note: internotMesh.NB.note });
++    await shot('chat-nearby');
++    tab('model'); await shot('setup');
++  } catch (e) { log('failed', String(e && e.stack || e)); }
++  log('done', 1);
++})();
+diff --git a/internot-ai-v0.4/app.js b/internot-ai-v0.4/app.js
+index 107b50f..3e77d51 100644
+--- a/internot-ai-v0.4/app.js
++++ b/internot-ai-v0.4/app.js
+@@ -152,0 +153,2 @@ async function ensureLoaded() {
++    // Older phones: a second, slower build of the engine that the library switches to by itself when it has to.
++    const at = (p) => new URL(p, location.href).href; state.wllama.setCompat({ worker: at('./lib/wllama/compat/wllama.js'), wasm: at('./lib/wllama/compat/wllama.wasm') });
+diff --git a/internot-ai-v0.4/index.html b/internot-ai-v0.4/index.html
+index 7a05a0b..c7141be 100644
+--- a/internot-ai-v0.4/index.html
++++ b/internot-ai-v0.4/index.html
+@@ -64,0 +65 @@
++        <div id="mesh-nearby-box" hidden><div class="row wrap"><button id="mesh-nearby" type="button">Find nearby phones</button></div><p id="mesh-nearby-note" class="hint"></p></div>
+diff --git a/internot-ai-v0.4/maps.js b/internot-ai-v0.4/maps.js
+index 49c8e08..4b340a2 100644
+--- a/internot-ai-v0.4/maps.js
++++ b/internot-ai-v0.4/maps.js
+@@ -106,0 +107 @@ const NATIVE = !!window.Capacitor;
++const TTS = NATIVE ? window.capacitorExports?.registerPlugin?.('TextToSpeech') : null;
+@@ -349,0 +351 @@ function makeRoute(from, to) {
++function hush() { try { if (TTS) TTS.stop().catch(() => {}); else speechSynthesis?.cancel(); } catch {} }
+@@ -351,2 +353,6 @@ function speak(text) {
+-  M.spoken.push(text);
+-  if (M.mute || !('speechSynthesis' in window)) return;
++  M.spoken.push(text); if (M.mute) return;
++  if (TTS) {   // Android app: the phone's own text-to-speech voice, which works with no internet
++    TTS.speak({ text, lang: 'en-US', rate: 0.95, queueStrategy: 1 }).catch((e) => { console.warn('voice failed', e); if (!M.voiceWarned) { M.voiceWarned = true; msg('Voice is not available. Switch on a text-to-speech voice in the phone settings.'); } });
++    return;
++  }
++  if (!('speechSynthesis' in window)) return;
+@@ -429 +435 @@ function renderSheet() {
+-  if (M.nav) { sheet.hidden = false; row.append(button('End navigation', 'danger', () => endNav(false)), button(M.mute ? 'Voice off' : 'Voice on', '', () => { M.mute = !M.mute; if (M.mute) speechSynthesis?.cancel(); renderSheet(); })); sheet.append(row); return; }
++  if (M.nav) { sheet.hidden = false; row.append(button('End navigation', 'danger', () => endNav(false)), button(M.mute ? 'Voice off' : 'Voice on', '', () => { M.mute = !M.mute; if (M.mute) hush(); renderSheet(); })); sheet.append(row); return; }
+@@ -509,0 +516 @@ M.api = { makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint };
++M.api.speakTest = async (text) => { if (!TTS) return { native: false, web: 'speechSynthesis' in window }; const l = await TTS.getSupportedLanguages().catch((e) => ({ error: String(e) })); const said = await Promise.race([TTS.speak({ text, lang: 'en-US' }).then(() => 'spoken', (e) => 'failed: ' + (e?.message || e)), new Promise((r) => setTimeout(() => r('timeout'), 9000))]); return { native: true, languages: l.languages ? l.languages.length : l, said }; };
+diff --git a/internot-ai-v0.4/mesh.js b/internot-ai-v0.4/mesh.js
+index 4be8440..7bc00c5 100644
+--- a/internot-ai-v0.4/mesh.js
++++ b/internot-ai-v0.4/mesh.js
+@@ -92,0 +93,27 @@ export async function acceptAnswer(code) {
++/* ---------- nearby links: Bluetooth and Wi-Fi, found automatically (Android app only) ---------- */
++const NB = { plugin: window.Capacitor ? window.capacitorExports?.registerPlugin?.('Nearby') : null, on: false, wired: false, links: new Map(), parts: new Map(), note: '' };
++function nbLink(ep) {
++  const dc = { readyState: 'open', bufferedAmount: 0,
++    send(s) { const n = Math.ceil(s.length / 9000) || 1, k = rid(4); for (let i = 0; i < n; i++) NB.plugin.send({ endpoint: ep, data: `${k}|${i}|${n}|${s.slice(i * 9000, (i + 1) * 9000)}` }).catch((e) => console.warn('nearby send failed', e)); },
++    close() { if (this.readyState === 'closed') return; this.readyState = 'closed'; NB.links.delete(ep); NB.plugin.disconnect({ endpoint: ep }).catch(() => {}); } };
++  const link = attach({ connectionState: 'connected', addEventListener() {}, close() {} }, dc); link.nearby = ep; NB.links.set(ep, link); return link;
++}
++function nbData(ep, raw) {   // one message can arrive in several pieces: Bluetooth packets are small
++  const link = NB.links.get(ep); if (!link) return; const a = raw.indexOf('|'), b = raw.indexOf('|', a + 1), c = raw.indexOf('|', b + 1); if (c < 0) return;
++  const k = ep + raw.slice(0, a), i = +raw.slice(a + 1, b), n = +raw.slice(b + 1, c), d = raw.slice(c + 1); let full = d;
++  if (n > 1) { if (!(n <= 64)) return; const p = NB.parts.get(k) || { got: 0, d: new Array(n) }; NB.parts.set(k, p); if (p.d[i] === undefined) { p.d[i] = d; p.got++; } if (p.got < n) return; NB.parts.delete(k); full = p.d.join(''); }
++  link.dc.onmessage?.({ data: full });
++}
++async function nbStart() {
++  if (!NB.plugin || NB.on || !S.me?.name) return;
++  if (!NB.wired) { NB.wired = true;
++    NB.plugin.addListener('connected', (e) => { nbLink(e.endpoint); render(); });
++    NB.plugin.addListener('disconnected', (e) => { const l = NB.links.get(e.endpoint); NB.links.delete(e.endpoint); if (l) dropLink(l); render(); });
++    NB.plugin.addListener('data', (e) => nbData(e.endpoint, e.data));
++  }
++  try { await NB.plugin.start({ name: S.me.name }); NB.on = true; NB.note = ''; try { localStorage.setItem('nearby', '1'); } catch {} }
++  catch (e) { NB.note = e?.message || 'Nearby linking is not available on this phone.'; }
++  render();
++}
++async function nbStop() { NB.on = false; try { localStorage.removeItem('nearby'); } catch {} for (const l of [...NB.links.values()]) dropLink(l); try { await NB.plugin.stop(); } catch {} render(); }
++
+@@ -237,0 +265,2 @@ function render() {
++  $('mesh-nearby-box').hidden = !NB.plugin; $('mesh-nearby').textContent = NB.on ? 'Stop nearby linking' : 'Find nearby phones';
++  $('mesh-nearby-note').textContent = NB.note || (NB.on ? `Looking for phones nearby that have Internot AI open. ${NB.links.size} linked this way.` : 'Links by itself with phones close by, over Bluetooth or shared Wi‑Fi. No internet and no codes.');
+@@ -267,0 +297 @@ function wire() {
++  $('mesh-nearby').onclick = () => (NB.on ? nbStop() : nbStart());
+@@ -289 +319,3 @@ export async function initMesh(root, onUnread) {
+-  window.internotMesh = { S, makeOffer, acceptOffer, acceptAnswer, send, drawQR, readQR, reach };
++  window.internotMesh = { S, NB, makeOffer, acceptOffer, acceptAnswer, send, drawQR, readQR, reach, nbLink, nbData };
++  let auto = false; try { auto = !!localStorage.getItem('nearby'); } catch {}
++  if (auto) nbStart();
+diff --git a/internot-ai-v0.4/sw.js b/internot-ai-v0.4/sw.js
+index 047c9e8..010282b 100644
+--- a/internot-ai-v0.4/sw.js
++++ b/internot-ai-v0.4/sw.js
+@@ -3 +3 @@
+-const VERSION = 'internot-v0.5.0';
++const VERSION = 'internot-v0.6.0';
