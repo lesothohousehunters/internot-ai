@@ -1,0 +1,326 @@
+diff --git a/android/bundled.js b/android/bundled.js
+index 496e394..33dc85e 100644
+--- a/android/bundled.js
++++ b/android/bundled.js
+@@ -1,2 +1,3 @@
+-// First launch of the full APK: unpack the AI model and map that ship inside the app.
+-(async () => {
++// Full Android app, first launch: unpack the AI model that ships inside the app into app storage.
++// Runs before the app starts; the app waits for window.internotSetup.
++window.internotSetup = (async () => {
+@@ -9,4 +10,2 @@
+-  const box = document.createElement('div');
+-  box.style.cssText = 'position:fixed;inset:0;z-index:99;background:#f0eee6;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;font:17px system-ui';
+-  box.innerHTML = '<img src="icon.svg" width="72" height="72" alt=""><b style="font-size:22px">Setting up Internot AI</b><div id="b-what"></div><div style="width:240px;height:8px;background:#e8e4d8;border-radius:9px;overflow:hidden"><div id="b-bar" style="height:100%;width:0;background:#d97757"></div></div><small style="color:#6b6860">One time only. No internet is used.</small>';
+-  document.body.append(box);
++  const text = document.getElementById('boot-text'), bar = document.getElementById('boot-bar');
++  document.getElementById('boot-progress').hidden = false;
+@@ -15 +14 @@
+-      box.querySelector('#b-what').textContent = 'Unpacking the ' + j.label + '…';
++      text.textContent = 'Getting the ' + j.label + ' ready. One time only, no internet used.';
+@@ -18 +17 @@
+-      for (;;) { const { value, done: end } = await rd.read(); if (end) break; await w.write(value); n += value.byteLength; box.querySelector('#b-bar').style.width = Math.min(100, n / j.size * 100) + '%'; }
++      for (;;) { const { value, done: end } = await rd.read(); if (end) break; await w.write(value); n += value.byteLength; bar.style.width = Math.min(100, n / j.size * 100) + '%'; }
+@@ -23,2 +22,2 @@
+-    location.reload();
+-  } catch (e) { box.querySelector('#b-what').textContent = 'Setup could not finish (' + e.message + '). Free some storage and reopen the app.'; }
++  } catch (e) { text.textContent = 'Setup could not finish (' + e.message + '). Free some storage and reopen the app.'; await new Promise((r) => setTimeout(r, 6000)); }
++  document.getElementById('boot-progress').hidden = true;
+diff --git a/internot-ai-v0.4/app.js b/internot-ai-v0.4/app.js
+index 827f6ba..107b50f 100644
+--- a/internot-ai-v0.4/app.js
++++ b/internot-ai-v0.4/app.js
+@@ -1 +1 @@
+-// Internot AI — The Brain (v0.1)
++// Internot AI — The Brain
+@@ -12,0 +13,15 @@ const MAX_MODEL_BYTES = 2000 * MB; // browser limit for a single model file
++const NATIVE = !!window.Capacitor;   // running inside the installed Android app
++
++/* ---------- loader: the logo with a blinking exclamation mark ---------- */
++let logoN = 2;
++export function logoSVG(size, blink) {
++  const id = 'lg' + logoN++;
++  return `<svg class="logo${blink ? ' blink' : ''}" viewBox="0 0 512 512" width="${size}" height="${size}" aria-hidden="true"><mask id="${id}"><rect width="512" height="512" fill="#fff"/><rect x="206" width="100" height="512" fill="#000"/></mask><g mask="url(#${id})" fill="none" stroke="#d97757" stroke-width="42" stroke-linecap="round"><path d="M72 241A240 240 0 0 1 440 241"/><path d="M130 289A165 165 0 0 1 382 289"/><path d="M187 337A90 90 0 0 1 325 337"/></g><g class="bang" fill="#d97757"><rect x="228" y="100" width="56" height="236" rx="28"/><circle cx="256" cy="396" r="33"/></g></svg>`;
++}
++// Full-screen loader. loader('text') shows it, loader('text', 0.4) adds a progress bar, loader(null) hides it.
++export function loader(text, frac) {
++  const box = $('boot'); if (text == null) { box.hidden = true; return; }
++  box.hidden = false; $('boot-text').textContent = text;
++  $('boot-progress').hidden = frac == null; if (frac != null) $('boot-bar').style.width = Math.round(frac * 100) + '%';
++}
++window.internotLoader = loader;
+@@ -15,2 +30,2 @@ const DEFAULTS = {
+-  cool: true, unload: true, gpu: false, max: 512, useDocs: false, temp: 0.6,
+-  system: 'You are The Brain, a helpful offline assistant inside Internot AI. Answer clearly and briefly. If you are not sure, say so.',
++  cool: false, unload: true, gpu: false, max: 256, useDocs: false, temp: 0.6,
++  system: 'You are The Brain, an offline assistant. Give short, clear answers. If you are not sure, say so.',
+@@ -53 +68 @@ async function getStoredModel() {
+-function setStatus(text, kind = '') { const el = $('status'); el.textContent = text; el.className = 'status ' + kind; }
++function setStatus(text, kind = '') { const el = $('status'); el.textContent = text; el.className = 'status ' + kind; $('brand-logo').classList.toggle('blink', kind === 'busy'); }
+@@ -79 +94 @@ async function saveModelFromStream(stream, total, name) {
+-      setStatus(`Saving model… ${fmtSize(done)}`, 'busy');
++      setStatus(total ? `Saving model… ${Math.floor(done / total * 100)}% of ${fmtSize(total)}` : `Saving model… ${fmtSize(done)}`, 'busy');
+@@ -138 +153,3 @@ async function ensureLoaded() {
+-    await state.wllama.loadModel([blob], { n_ctx: 4096, n_gpu_layers: state.settings.gpu ? 99 : 0 });
++    // Half the cores, at most four: the small cores on phone chips slow everything down when they join in.
++    const cores = navigator.hardwareConcurrency || 4; const n_threads = Math.max(1, Math.min(4, cores > 4 ? cores >> 1 : cores));
++    await state.wllama.loadModel([blob], { n_ctx: 2048, n_threads, n_gpu_layers: state.settings.gpu ? 99 : 0 });
+@@ -152,0 +170,2 @@ async function unloadModel() {
++// Load the model before the first question, so the answer starts straight away.
++function warmUp() { if (state.modelMeta && !state.loaded && !state.loading && !document.hidden) ensureLoaded().catch((e) => { console.warn('warm-up failed', e); setStatus('Tap Send to wake The Brain'); }); }
+@@ -201 +220 @@ function buildMessages(question) {
+-  const history = state.messages.slice(-8).map(({ role, content }) => ({ role, content })); // keep the prompt small for small phones
++  const history = state.messages.slice(-6).map(({ role, content }) => ({ role, content })); // keep the prompt small for small phones
+@@ -213,0 +233 @@ async function send(question) {
++    const think = document.createElement('span'); think.className = 'think'; think.innerHTML = logoSVG(22, true) + 'Thinking…'; bubble.append(think);
+@@ -231 +251 @@ async function send(question) {
+-              bubble.firstChild.textContent = reply.content; scrollDown();
++              think.remove(); bubble.firstChild.textContent = reply.content; scrollDown();
+@@ -301 +321 @@ function renderDevice() {
+-    ['Fast mode (multi-thread)', self.crossOriginIsolated ? 'on' : 'off — reopen the app once to switch on'],
++    ['Fast mode (multi-thread)', self.crossOriginIsolated ? 'on' : NATIVE ? 'not available in this Android build' : 'off — reopen the app once to switch on'],
+@@ -303 +323 @@ function renderDevice() {
+-    ['Works offline', navigator.serviceWorker?.controller ? 'yes' : 'after next reopen'],
++    ['Works offline', NATIVE || navigator.serviceWorker?.controller ? 'yes' : 'after next reopen'],
+@@ -352,0 +373 @@ function wire() {
++    if (!document.hidden) warmUp();
+@@ -358 +379 @@ async function registerSW() {
+-  if (!('serviceWorker' in navigator)) return;
++  if (NATIVE || !('serviceWorker' in navigator)) return;
+@@ -367,0 +389 @@ async function registerSW() {
++  try { await window.internotSetup; } catch {}   // full Android app: first-launch unpacking of the built-in model
+@@ -375 +397 @@ async function registerSW() {
+-  setStatus(state.modelMeta ? 'Asleep · tap Send to wake' : 'No model yet');
++  setStatus(state.modelMeta ? 'Waking The Brain…' : 'No model yet', state.modelMeta ? 'busy' : '');
+@@ -379,0 +402,2 @@ async function registerSW() {
++  loader(null);
++  setTimeout(warmUp, 300);
+diff --git a/internot-ai-v0.4/index.html b/internot-ai-v0.4/index.html
+index 7d7d5ed..7a05a0b 100644
+--- a/internot-ai-v0.4/index.html
++++ b/internot-ai-v0.4/index.html
+@@ -12,0 +13,6 @@
++<div id="boot" class="boot" role="status" aria-live="polite">
++  <svg class="logo blink" viewBox="0 0 512 512" width="112" height="112" aria-hidden="true"><mask id="lg0"><rect width="512" height="512" fill="#fff"/><rect x="206" width="100" height="512" fill="#000"/></mask><g mask="url(#lg0)" fill="none" stroke="#d97757" stroke-width="42" stroke-linecap="round"><path d="M72 241A240 240 0 0 1 440 241"/><path d="M130 289A165 165 0 0 1 382 289"/><path d="M187 337A90 90 0 0 1 325 337"/></g><g class="bang" fill="#d97757"><rect x="228" y="100" width="56" height="236" rx="28"/><circle cx="256" cy="396" r="33"/></g></svg>
++  <b>Internot AI</b>
++  <div id="boot-text">Starting…</div>
++  <div id="boot-progress" class="progress" hidden><div id="boot-bar"></div></div>
++</div>
+@@ -14 +20 @@
+-  <div class="brand"><img src="icon.svg" alt="" width="26" height="26"><span>Internot AI</span></div>
++  <div class="brand"><svg id="brand-logo" class="logo" viewBox="0 0 512 512" width="28" height="28" aria-hidden="true"><mask id="lg1"><rect width="512" height="512" fill="#fff"/><rect x="206" width="100" height="512" fill="#000"/></mask><g mask="url(#lg1)" fill="none" stroke="#d97757" stroke-width="42" stroke-linecap="round"><path d="M72 241A240 240 0 0 1 440 241"/><path d="M130 289A165 165 0 0 1 382 289"/><path d="M187 337A90 90 0 0 1 325 337"/></g><g class="bang" fill="#d97757"><rect x="228" y="100" width="56" height="236" rx="28"/><circle cx="256" cy="396" r="33"/></g></svg><span>Internot AI</span></div>
+@@ -36,15 +42 @@
+-    <div id="map-empty" class="pad">
+-      <h2>Offline maps</h2>
+-      <div class="card">
+-        <p><b>Add a map once, then navigate with no data.</b></p>
+-        <ol class="howto">
+-          <li>On Wi‑Fi, open <a href="https://download.geofabrik.de/africa/lesotho.html" target="_blank" rel="noopener">download.geofabrik.de → Africa → Lesotho</a> and download the file ending in <code>.osm.pbf</code>. Any other country works the same way.</li>
+-          <li>Tap the button below and choose that file. The phone turns it into a map, which takes a minute or two.</li>
+-        </ol>
+-        <div class="row wrap"><label class="button primary">Add map file<input id="map-file" type="file" accept=".pbf,.imap,application/octet-stream" hidden></label></div>
+-        <div id="map-progress" hidden><div class="progress"><div id="map-progress-bar"></div></div><p id="map-progress-label" class="hint"></p></div>
+-        <p id="map-error" class="hint err"></p>
+-        <p class="hint">Map data © OpenStreetMap contributors.</p>
+-      </div>
+-    </div>
+-    <div id="map-wrap" hidden>
++    <div id="map-wrap">
+@@ -57 +49 @@
+-      <div class="map-attrib">© OpenStreetMap contributors</div>
++      <div class="map-attrib">© OpenStreetMap contributors · Natural Earth</div>
+@@ -137 +129 @@
+-      <label><input type="checkbox" id="set-cool"> <span><b>Cool‑down pauses</b><small>Rest 2 seconds after every block of text to limit heat and battery wear.</small></span></label>
++      <label><input type="checkbox" id="set-cool"> <span><b>Cool‑down pauses</b><small>Rest 2 seconds after every block of text to limit heat and battery wear. Answers take longer.</small></span></label>
+@@ -141 +133 @@
+-        <select id="set-max"><option>256</option><option>512</option><option>1024</option></select></label>
++        <select id="set-max"><option>128</option><option>256</option><option>512</option><option>1024</option></select></label>
+@@ -150,2 +142,8 @@
+-    <h2>Map</h2>
+-    <div class="card"><div id="map-info" class="model-info">No map on this device yet.</div>
++    <h2>Maps</h2>
++    <div class="card"><div id="map-info" class="model-info">World map only.</div>
++      <p class="hint">The world map is always here. A country map adds every street, village and clinic, and turn-by-turn directions.</p>
++      <div class="row wrap"><button id="map-get" type="button" class="primary" hidden>Get the Lesotho street map</button>
++        <label class="button">Add a country map file<input id="map-file" type="file" accept=".pbf,.imap,application/octet-stream" hidden></label></div>
++      <div id="map-progress" hidden><div class="progress"><div id="map-progress-bar"></div></div><p id="map-progress-label" class="hint"></p></div>
++      <p id="map-error" class="hint err"></p>
++      <details><summary>Where to get other countries</summary><p class="hint">On Wi‑Fi, open <a href="https://download.geofabrik.de/" target="_blank" rel="noopener">download.geofabrik.de</a>, choose a country and download the file ending in <code>.osm.pbf</code>. Then tap “Add a country map file” and choose it. Map data © OpenStreetMap contributors. World map: Natural Earth.</p></details>
+diff --git a/internot-ai-v0.4/maps.js b/internot-ai-v0.4/maps.js
+index 5ebf3e3..ddb64ca 100644
+--- a/internot-ai-v0.4/maps.js
++++ b/internot-ai-v0.4/maps.js
+@@ -18 +18 @@ const M = {
+-  mute: false, raf: 0, spoken: [], wake: null,
++  mute: false, raf: 0, spoken: [], wake: null, world: null,
+@@ -69,0 +70,20 @@ function prepare(map) {
++/* ---------- world base map (ships with the app) ---------- */
++async function loadWorld() {
++  try {
++    const w = await (await fetch('./world.json')).json(); const k = TWO32 / w.grid; const path = new Path2D();
++    for (const r of w.rings) { let x = r[0], y = r[1]; path.moveTo(x, y); for (let i = 2; i < r.length; i += 2) { x += r[i]; y += r[i + 1]; path.lineTo(x, y); } path.closePath(); }
++    M.world = { grid: w.grid, path,
++      countries: w.countries.map(([name, x, y, rank]) => ({ name, x: x * k, y: y * k, rank, lower: name.toLowerCase(), kind: 'country' })),
++      cities: w.cities.map(([name, x, y, rank, country, cap]) => ({ name, x: x * k, y: y * k, rank, country, cap, lower: name.toLowerCase(), kind: 'city' })) };
++    draw();
++  } catch (e) { console.warn('world map unavailable', e); }
++}
++const cityMinZ = (c) => c.rank <= 1 ? 3 : c.rank <= 3 ? 4.5 : c.rank <= 5 ? 5.5 : c.rank <= 7 ? 6.5 : 7.5;
++const inDetail = (p) => { const m = M.map; if (!m || m.stub) return false; const [a, b, c, d] = m.bbox; return p.x >= a && p.x <= c && p.y >= b && p.y <= d; };
++function stubMap() {
++  const e = () => new Uint32Array(0);
++  return prepare({ stub: true, name: 'World', built: '', N: 0, W: 0, R: 0, X: e(), Y: e(), wayStart: new Uint32Array(1), wayNodes: e(), wayName: e(),
++    wayClass: new Uint8Array(0), wayFlags: new Uint8Array(0), names: [], places: [], bbox: [0, 0, TWO32 - 1, TWO32 - 1] });
++}
++function showWorld() { M.map = stubMap(); M.view.cx = lonToX(22); M.view.cy = latToY(-8); M.view.z = 2.6; M.needFit = false; showMap(true); resize(); }
++
+@@ -81,0 +102,18 @@ function setProgress(frac, label) {
++  window.internotLoader?.(frac == null ? null : (label || 'Preparing map') + '…', frac ?? undefined);
++}
++// A ready-made country map that ships with the app (inside the Android app, or beside the web app).
++const BUILT_IN = './maps/lesotho.imap';
++const NATIVE = !!window.Capacitor;
++let builtIn = null;
++function builtInAvailable() { return builtIn ||= fetch(BUILT_IN, { method: 'HEAD' }).then((r) => r.ok && !/html/.test(r.headers.get('content-type') || ''), () => false); }
++async function useBuiltIn() {   // Android app: the file is already on the phone, so read it in place
++  try { const r = await fetch(BUILT_IN); if (!r.ok) return false; const buf = await r.arrayBuffer(); decodeImap(buf); M.mem = buf; return await loadStored(); } catch (e) { console.warn('built-in map unreadable', e); M.mem = null; return false; }
++}
++async function getBuiltIn() {   // web app: one download, then kept on the device
++  $('map-error').textContent = '';
++  try {
++    const r = await fetch(BUILT_IN); if (!r.ok || !r.body) throw new Error('The map could not be downloaded. Check the connection and try again.');
++    const total = Number(r.headers.get('content-length')) || 0; const rd = r.body.getReader(); const parts = []; let n = 0;
++    for (;;) { const { value, done } = await rd.read(); if (done) break; parts.push(value); n += value.byteLength; setProgress(total ? n / total * 0.9 : 0.5, 'Downloading map'); }
++    await importMap(new File(parts, 'lesotho.imap'));
++  } catch (e) { setProgress(null); $('map-error').textContent = e?.message || 'The map could not be downloaded.'; }
+@@ -110 +148 @@ async function deleteMap() {
+-  endNav(); clearRoute(); M.map = null; M.mem = null;
++  endNav(); clearRoute(); M.map = null; M.mem = null; try { localStorage.setItem('noBuiltInMap', '1'); } catch {}
+@@ -112 +150 @@ async function deleteMap() {
+-  showMap(false); renderMapInfo();
++  showWorld(); renderMapInfo();
+@@ -114 +152 @@ async function deleteMap() {
+-function showMap(on) { $('map-empty').hidden = on; $('map-wrap').hidden = !on; }
++function showMap() { $('map-wrap').hidden = false; }
+@@ -117,2 +155,4 @@ function renderMapInfo() {
+-  el.textContent = M.map ? `${M.map.name} · ${M.map.W.toLocaleString()} roads · ${M.map.placeList.length.toLocaleString()} places · map data from ${M.map.built}` : 'No map on this device yet.';
+-  $('map-delete').hidden = !M.map; $('map-replace').hidden = !M.map;
++  const real = M.map && !M.map.stub;
++  el.textContent = real ? `${M.map.name} · ${M.map.W.toLocaleString()} roads · ${M.map.placeList.length.toLocaleString()} places · map data from ${M.map.built}` : 'World map only. Add a country map below for streets, villages and directions.';
++  $('map-delete').hidden = !real; $('map-replace').hidden = true;
++  builtInAvailable().then((ok) => { $('map-get').hidden = real || !ok; });
+@@ -134 +173,0 @@ function paint() {
+-  ctx.fillStyle = '#f3f0e7'; ctx.fillRect(0, 0, M.w, M.h);
+@@ -137,0 +177,5 @@ function paint() {
++  const wd = M.world; ctx.fillStyle = wd ? '#d3e3ee' : '#f3f0e7'; ctx.fillRect(0, 0, M.w, M.h);
++  if (wd) {   // land and country borders, drawn from one cached outline
++    const s = TWO32 / wd.grid / u; ctx.save(); ctx.setTransform(M.dpr * s, 0, 0, M.dpr * s, M.dpr * ox, M.dpr * oy);
++    ctx.fillStyle = '#f3f0e7'; ctx.fill(wd.path); ctx.lineWidth = 1.1 / s; ctx.strokeStyle = '#bfb39a'; ctx.stroke(wd.path); ctx.restore();
++  }
+@@ -181,0 +226,12 @@ function paint() {
++  if (wd) {
++    const label = (p, font, col) => {
++      if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) return; const sx = p.x / u + ox, sy = p.y / u + oy; ctx.font = font;
++      const tw = ctx.measureText(p.name).width; const city = p.kind === 'city'; const tx = city ? sx + 7 : sx - tw / 2; const rect = [tx - 3, sy - 9, tx + tw + 3, sy + 9];
++      if (used.some((q) => rect[0] < q[2] && rect[2] > q[0] && rect[1] < q[3] && rect[3] > q[1])) return; used.push(rect);
++      if (city) { ctx.fillStyle = p.cap ? '#c15f3c' : '#6b6860'; ctx.beginPath(); ctx.arc(sx, sy, p.cap ? 3.5 : 2.5, 0, 7); ctx.fill(); }
++      ctx.strokeStyle = 'rgba(243,240,231,.92)'; ctx.lineWidth = 4; ctx.strokeText(p.name, tx, sy); ctx.fillStyle = col; ctx.fillText(p.name, tx, sy);
++    };
++    if (z < 7.5) for (const c of wd.countries) { if (c.rank <= z + 0.5 && used.length < 60) label(c, '600 13px system-ui, sans-serif', '#7a4a36'); }
++    for (const c of wd.cities) { if (z >= cityMinZ(c) && used.length < 90 && !inDetail(c)) label(c, '12px system-ui, sans-serif', '#2b2a27'); }
++  }
++
+@@ -362,0 +419 @@ function directions() {
++  if (M.map.stub) { msg('Directions need a country street map. Add one under Setup.'); return; }
+@@ -365 +422 @@ function directions() {
+-  if (!makeRoute(from, M.dest)) { clearRoute(); msg('No road route was found between these two points.'); }
++  if (!makeRoute(from, M.dest)) { clearRoute(); msg(M.map.stub ? 'Directions need a country street map. Add one under Setup.' : 'No road route was found between these two points. Directions work inside ' + M.map.name + '.'); }
+@@ -395,0 +453 @@ function pickAt(x, y, label) {
++    if (!best && M.world) for (const p of M.world.cities) { if (M.view.z < cityMinZ(p)) continue; const d = Math.hypot(p.x - x, p.y - y); if (d < bd) { bd = d; best = p; } }
+@@ -403 +461 @@ function search(q) {
+-  const box = $('map-results'); box.textContent = ''; q = q.trim().toLowerCase(); if (!q || !M.map) { box.hidden = true; return; }
++  const box = $('map-results'); box.textContent = ''; q = q.trim().toLowerCase(); if (q.length < 2 || !M.map) { box.hidden = true; return; }
+@@ -404,0 +463,4 @@ function search(q) {
++  if (M.world && hits.length < 12) {   // then countries and cities of the world
++    const rank = (a, b) => (b.lower.startsWith(q) - a.lower.startsWith(q)) || (a.rank - b.rank);
++    for (const p of [...M.world.countries.filter((c) => c.lower.includes(q)).sort(rank), ...M.world.cities.filter((c) => c.lower.includes(q) && !inDetail(c)).sort(rank)].slice(0, 12 - hits.length)) hits.push(p);
++  }
+@@ -406,2 +468,2 @@ function search(q) {
+-    const li = document.createElement('li'); li.textContent = p.name; const sm = document.createElement('small'); sm.textContent = PLACE_TYPES[p.t].replace('_', ' '); li.append(sm);
+-    li.onclick = () => { box.hidden = true; $('map-search').value = p.name; $('map-search').blur(); M.follow = false; M.view.cx = p.x; M.view.cy = p.y; M.view.z = Math.max(M.view.z, p.t <= 1 ? 13 : 15.5); pickAt(p.x, p.y, p.name); };
++    const li = document.createElement('li'); li.textContent = p.name; const sm = document.createElement('small'); sm.textContent = p.kind === 'country' ? 'country' : p.kind ? (p.cap ? 'capital · ' : 'city · ') + p.country : PLACE_TYPES[p.t].replace('_', ' '); li.append(sm);
++    li.onclick = () => { box.hidden = true; $('map-search').value = p.name; $('map-search').blur(); M.follow = false; M.view.cx = p.x; M.view.cy = p.y; M.view.z = p.kind === 'country' ? 5 : p.kind ? 9 : Math.max(M.view.z, p.t <= 1 ? 13 : 15.5); pickAt(p.x, p.y, p.name); };
+@@ -417 +479 @@ function wireCanvas() {
+-  const zoomAt = (sx, sy, dz) => { const before = fromS(sx, sy); M.view.z = Math.min(19, Math.max(5, M.view.z + dz)); const after = fromS(sx, sy); M.view.cx += before.x - after.x; M.view.cy += before.y - after.y; draw(); };
++  const zoomAt = (sx, sy, dz) => { const before = fromS(sx, sy); M.view.z = Math.min(19, Math.max(1.5, M.view.z + dz)); const after = fromS(sx, sy); M.view.cx += before.x - after.x; M.view.cy += before.y - after.y; draw(); };
+@@ -439 +501,6 @@ export async function initMaps(root) {
+-  try { await loadStored(); } catch (e) { console.warn('stored map unreadable', e); }
++  let ok = false; try { ok = await loadStored(); } catch (e) { console.warn('stored map unreadable', e); }
++  let off = false; try { off = !!localStorage.getItem('noBuiltInMap'); } catch {}
++  if (!ok && NATIVE && !off) ok = await useBuiltIn();
++  if (!ok) showWorld();
++  $('map-get').onclick = () => { try { localStorage.removeItem('noBuiltInMap'); } catch {} return NATIVE ? useBuiltIn().then(renderMapInfo) : getBuiltIn(); };
++  loadWorld();
+diff --git a/internot-ai-v0.4/style.css b/internot-ai-v0.4/style.css
+index 1b44ea9..280a8d7 100644
+--- a/internot-ai-v0.4/style.css
++++ b/internot-ai-v0.4/style.css
+@@ -51 +51 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 5px; }
+-textarea, input[type=text], input[type=url], select {
++textarea, input[type=text], input[type=url], input[type=search], select {
+@@ -134,0 +135,9 @@ a { color: var(--accent-deep); }
++
++/* loader: the logo with a blinking exclamation mark */
++.logo { display: block; flex: none; }
++.logo.blink .bang { animation: bang .9s ease-in-out infinite; }
++@keyframes bang { 0%, 100% { opacity: 1; } 50% { opacity: .08; } }
++.boot { position: fixed; inset: 0; z-index: 100; background: var(--bg, #f0eee6); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center; }
++.boot[hidden] { display: none; }
++.boot b { font-size: 22px; } .boot #boot-text { color: var(--muted); min-height: 1.3em; } .boot .progress { width: 240px; max-width: 70vw; }
++.msg .think { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
+diff --git a/internot-ai-v0.4/sw.js b/internot-ai-v0.4/sw.js
+index df31df9..047c9e8 100644
+--- a/internot-ai-v0.4/sw.js
++++ b/internot-ai-v0.4/sw.js
+@@ -3,2 +3,2 @@
+-const VERSION = 'internot-v0.4.0';
+-const SHELL = ['./', './index.html', './style.css', './app.js', './maps.js', './mesh.js', './osmpbf.js', './map-worker.js', './lib/qrcode.js', './lib/jsqr.js', './icon.svg', './icon-192.png', './icon-512.png', './manifest.webmanifest',
++const VERSION = 'internot-v0.5.0';
++const SHELL = ['./', './index.html', './style.css', './app.js', './maps.js', './mesh.js', './osmpbf.js', './map-worker.js', './lib/qrcode.js', './lib/jsqr.js', './world.json', './icon.svg', './icon-192.png', './icon-512.png', './manifest.webmanifest',
+@@ -33 +33 @@ self.addEventListener('fetch', (e) => {
+-      if (res.ok) cache.put(req, res.clone());
++      if (res.ok && !/\/(maps|bundled)\//.test(req.url)) cache.put(req, res.clone());   // big files are kept in app storage instead
+diff --git a/internot-ai-v0.4/tools-build-world.mjs b/internot-ai-v0.4/tools-build-world.mjs
+new file mode 100644
+index 0000000..c2188df
+--- /dev/null
++++ b/internot-ai-v0.4/tools-build-world.mjs
+@@ -0,0 +1,28 @@
++#!/usr/bin/env node
++// Builds world.json, the small world base map that ships inside the app.
++//   node tools-build-world.mjs countries.geojson places.geojson world.json
++// Source: Natural Earth (public domain), 1:50m countries and populated places.
++import { readFileSync, writeFileSync } from 'node:fs';
++const [, , cFile, pFile, out] = process.argv;
++const G = 65536;
++const gx = (lon) => Math.round((lon + 180) / 360 * G);
++const gy = (lat) => { const s = Math.sin(Math.max(-85, Math.min(85, lat)) * Math.PI / 180); return Math.round((0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * G); };
++const rings = [], countries = [];
++for (const f of JSON.parse(readFileSync(cFile, 'utf8')).features) {
++  const p = f.properties, g = f.geometry; if (!g) continue;
++  for (const poly of g.type === 'Polygon' ? [g.coordinates] : g.coordinates) {
++    const ring = poly[0]; const flat = []; let lx = null, ly = null, x0 = G, x1 = 0, y0 = G, y1 = 0;
++    for (const [lon, lat] of ring) {
++      const x = gx(lon), y = gy(lat); if (x === lx && y === ly) continue;
++      flat.push(lx == null ? x : x - lx, ly == null ? y : y - ly); lx = x; ly = y;
++      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
++    }
++    if (flat.length >= 8 && (x1 - x0 > 2 || y1 - y0 > 2)) rings.push(flat);
++  }
++  if (p.NAME && p.LABEL_X != null) countries.push([p.NAME, gx(p.LABEL_X), gy(p.LABEL_Y), p.LABELRANK || 6]);
++}
++const cities = JSON.parse(readFileSync(pFile, 'utf8')).features.map((f) => f.properties)
++  .filter((p) => p.name).sort((a, b) => a.scalerank - b.scalerank || b.pop_max - a.pop_max)
++  .map((p) => [p.name, gx(p.longitude), gy(p.latitude), p.scalerank, p.adm0name || '', p.adm0cap ? 1 : 0]);
++writeFileSync(out, JSON.stringify({ v: 1, grid: G, rings, countries, cities }));
++console.log(`world.json: ${rings.length} outlines, ${countries.length} countries, ${cities.length} cities`);
