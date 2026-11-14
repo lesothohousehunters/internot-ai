@@ -1,4 +1,4 @@
-// Internot AI — The Brain (v0.1)
+// Internot AI — The Brain
 // Everything here runs on the device. The only network call in this file is
 // the optional one-time model download, which the user starts by hand.
 import { Wllama } from './lib/wllama/index.js';
@@ -10,10 +10,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const MB = 1024 * 1024;
 const MODEL_FILE = 'model.gguf';
 const MAX_MODEL_BYTES = 2000 * MB; // browser limit for a single model file
+const NATIVE = !!window.Capacitor;   // running inside the installed Android app
+
+/* ---------- loader: the logo with a blinking exclamation mark ---------- */
+let logoN = 2;
+export function logoSVG(size, blink) {
+  const id = 'lg' + logoN++;
+  return `<svg class="logo${blink ? ' blink' : ''}" viewBox="0 0 512 512" width="${size}" height="${size}" aria-hidden="true"><mask id="${id}"><rect width="512" height="512" fill="#fff"/><rect x="206" width="100" height="512" fill="#000"/></mask><g mask="url(#${id})" fill="none" stroke="#d97757" stroke-width="42" stroke-linecap="round"><path d="M72 241A240 240 0 0 1 440 241"/><path d="M130 289A165 165 0 0 1 382 289"/><path d="M187 337A90 90 0 0 1 325 337"/></g><g class="bang" fill="#d97757"><rect x="228" y="100" width="56" height="236" rx="28"/><circle cx="256" cy="396" r="33"/></g></svg>`;
+}
+// Full-screen loader. loader('text') shows it, loader('text', 0.4) adds a progress bar, loader(null) hides it.
+export function loader(text, frac) {
+  const box = $('boot'); if (text == null) { box.hidden = true; return; }
+  box.hidden = false; $('boot-text').textContent = text;
+  $('boot-progress').hidden = frac == null; if (frac != null) $('boot-bar').style.width = Math.round(frac * 100) + '%';
+}
+window.internotLoader = loader;
 
 const DEFAULTS = {
-  cool: true, unload: true, gpu: false, max: 512, useDocs: false, temp: 0.6,
-  system: 'You are The Brain, a helpful offline assistant inside Internot AI. Answer clearly and briefly. If you are not sure, say so.',
+  cool: false, unload: true, gpu: false, max: 256, useDocs: false, temp: 0.6,
+  system: 'You are The Brain, an offline assistant. Give short, clear answers. If you are not sure, say so.',
 };
 const COOL_BLOCK_TOKENS = 96;   // tokens generated between cool-down pauses
 const COOL_PAUSE_MS = 2000;
@@ -50,7 +65,7 @@ async function getStoredModel() {
 }
 
 /* ---------- status + helpers ---------- */
-function setStatus(text, kind = '') { const el = $('status'); el.textContent = text; el.className = 'status ' + kind; }
+function setStatus(text, kind = '') { const el = $('status'); el.textContent = text; el.className = 'status ' + kind; $('brand-logo').classList.toggle('blink', kind === 'busy'); }
 function fmtSize(bytes) { return bytes >= 1024 * MB ? (bytes / 1024 / MB).toFixed(2) + ' GB' : Math.round(bytes / MB) + ' MB'; }
 function showProgress(frac) {
   $('progress').hidden = frac == null;
@@ -76,7 +91,7 @@ async function saveModelFromStream(stream, total, name) {
       const { value, done: end } = await reader.read(); if (end) break;
       await w.write(value); done += value.byteLength;
       if (total) showProgress(done / total);
-      setStatus(`Saving model… ${fmtSize(done)}`, 'busy');
+      setStatus(total ? `Saving model… ${Math.floor(done / total * 100)}% of ${fmtSize(total)}` : `Saving model… ${fmtSize(done)}`, 'busy');
     }
     await w.close();
   } catch (e) { try { await w.abort(); } catch {} throw e; }
@@ -135,7 +150,9 @@ async function ensureLoaded() {
     if (!blob) throw new Error('NO_MODEL');
     setStatus('Waking The Brain…', 'busy');
     state.wllama = new Wllama({ default: './lib/wllama/wllama.wasm' }, { suppressNativeLog: true, allowOffline: true });
-    await state.wllama.loadModel([blob], { n_ctx: 4096, n_gpu_layers: state.settings.gpu ? 99 : 0 });
+    // Half the cores, at most four: the small cores on phone chips slow everything down when they join in.
+    const cores = navigator.hardwareConcurrency || 4; const n_threads = Math.max(1, Math.min(4, cores > 4 ? cores >> 1 : cores));
+    await state.wllama.loadModel([blob], { n_ctx: 2048, n_threads, n_gpu_layers: state.settings.gpu ? 99 : 0 });
     state.loaded = true;
     setStatus('Ready · offline', 'ok'); renderModel();
   })();
@@ -150,6 +167,8 @@ async function unloadModel() {
   state.wllama = null; state.loaded = false;
   setStatus(state.modelMeta ? 'Asleep · memory freed' : 'No model yet'); renderModel();
 }
+// Load the model before the first question, so the answer starts straight away.
+function warmUp() { if (state.modelMeta && !state.loaded && !state.loading && !document.hidden) ensureLoaded().catch((e) => { console.warn('warm-up failed', e); setStatus('Tap Send to wake The Brain'); }); }
 
 /* ---------- documents: chunk + keyword retrieval (no network, no embeddings) ---------- */
 const STOP = new Set('the a an and or of to in on for with is are was were be been it this that as at by from not but if then so we you they he she i me my our your their what which who how why when where do does did can could will would should have has had about into over under than too very just also'.split(' '));
@@ -198,7 +217,7 @@ function buildMessages(question) {
         hits.map((h, i) => `[${i + 1}] ${h.title}:\n${h.text}`).join('\n\n');
     }
   }
-  const history = state.messages.slice(-8).map(({ role, content }) => ({ role, content })); // keep the prompt small for small phones
+  const history = state.messages.slice(-6).map(({ role, content }) => ({ role, content })); // keep the prompt small for small phones
   return { msgs: [{ role: 'system', content: system }, ...history], sources };
 }
 
@@ -211,6 +230,7 @@ async function send(question) {
   try {
     await ensureLoaded();
     state.messages.push(reply); const bubble = renderMessages();
+    const think = document.createElement('span'); think.className = 'think'; think.innerHTML = logoSVG(22, true) + 'Thinking…'; bubble.append(think);
     const maxTotal = Number(state.settings.max); let used = 0;
     for (;;) {
       const block = state.settings.cool ? Math.min(COOL_BLOCK_TOKENS, maxTotal - used) : maxTotal;
@@ -228,7 +248,7 @@ async function send(question) {
               round += c.delta.content; used++;
               // Some models echo the partial answer back before continuing it; never show it twice.
               reply.content = round.startsWith(base) ? round : base.startsWith(round) ? base : base + round;
-              bubble.firstChild.textContent = reply.content; scrollDown();
+              think.remove(); bubble.firstChild.textContent = reply.content; scrollDown();
             }
             if (c.finish_reason) finish = c.finish_reason;
           }
@@ -298,9 +318,9 @@ function renderDevice() {
   const rows = [
     ['Memory', navigator.deviceMemory ? `about ${navigator.deviceMemory} GB` : 'not reported by this browser'],
     ['Processor cores', String(navigator.hardwareConcurrency || '?')],
-    ['Fast mode (multi-thread)', self.crossOriginIsolated ? 'on' : 'off — reopen the app once to switch on'],
+    ['Fast mode (multi-thread)', self.crossOriginIsolated ? 'on' : NATIVE ? 'not available in this Android build' : 'off — reopen the app once to switch on'],
     ['Offline storage', rootDir ? 'available' : 'not available (private tab?)'],
-    ['Works offline', navigator.serviceWorker?.controller ? 'yes' : 'after next reopen'],
+    ['Works offline', NATIVE || navigator.serviceWorker?.controller ? 'yes' : 'after next reopen'],
   ];
   const box = $('device'); box.textContent = '';
   for (const [k, v] of rows) { const d = document.createElement('div'); const a = document.createElement('span'); a.textContent = k; const b = document.createElement('span'); b.textContent = v; d.append(a, b); box.append(d); }
@@ -350,12 +370,13 @@ function wire() {
   // Memory guardrail: free the model after the app has been in the background for a minute.
   document.addEventListener('visibilitychange', () => {
     clearTimeout(state.hideTimer);
+    if (!document.hidden) warmUp();
     if (document.hidden && state.settings.unload) state.hideTimer = setTimeout(() => { if (document.hidden && !state.generating && !state.loading) unloadModel(); }, UNLOAD_AFTER_MS);
   });
 }
 
 async function registerSW() {
-  if (!('serviceWorker' in navigator)) return;
+  if (NATIVE || !('serviceWorker' in navigator)) return;
   try {
     await navigator.serviceWorker.register('./sw.js');
     await navigator.serviceWorker.ready;
@@ -365,6 +386,7 @@ async function registerSW() {
 }
 
 (async function start() {
+  try { await window.internotSetup; } catch {}   // full Android app: first-launch unpacking of the built-in model
   await initStorage();
   state.settings = { ...DEFAULTS, ...(await readJSON('settings.json', {})) };
   state.messages = (await readJSON('chat.json', [])).filter((m) => m.role !== 'note');
@@ -372,9 +394,11 @@ async function registerSW() {
   const stored = await getStoredModel();
   if (stored) state.modelMeta = (await readJSON('model.json', null)) || { name: MODEL_FILE, size: stored.size };
   wire(); applySettingsToUI(); renderMessages(); renderDocs(); renderModel(); renderDevice();
-  setStatus(state.modelMeta ? 'Asleep · tap Send to wake' : 'No model yet');
+  setStatus(state.modelMeta ? 'Waking The Brain…' : 'No model yet', state.modelMeta ? 'busy' : '');
   window.internot = state; // handy when debugging
   initMaps(rootDir).catch((e) => console.error('maps failed to start', e));
   initMesh(rootDir, (n) => { const b = $('mesh-badge'); b.hidden = !n; b.textContent = n || ''; }).catch((e) => console.error('chat failed to start', e));
   registerSW();
+  loader(null);
+  setTimeout(warmUp, 300);
 })();

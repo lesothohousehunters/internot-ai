@@ -1,7 +1,7 @@
 // Internot AI service worker: makes the app open with no internet at all,
 // and adds the two headers browsers need before they allow multi-threaded (fast) inference.
-const VERSION = 'internot-v0.4.0';
-const SHELL = ['./', './index.html', './style.css', './app.js', './maps.js', './mesh.js', './osmpbf.js', './map-worker.js', './lib/qrcode.js', './lib/jsqr.js', './icon.svg', './icon-192.png', './icon-512.png', './manifest.webmanifest',
+const VERSION = 'internot-v0.5.0';
+const SHELL = ['./', './index.html', './style.css', './app.js', './maps.js', './mesh.js', './osmpbf.js', './map-worker.js', './lib/qrcode.js', './lib/jsqr.js', './world.json', './icon.svg', './icon-192.png', './icon-512.png', './manifest.webmanifest',
   './lib/wllama/index.js', './lib/wllama/wllama.wasm'];
 
 self.addEventListener('install', (e) => {
@@ -30,7 +30,7 @@ self.addEventListener('fetch', (e) => {
     if (hit) return isolate(hit);
     try {
       const res = await fetch(req);
-      if (res.ok) cache.put(req, res.clone());
+      if (res.ok && !/\/(maps|bundled)\//.test(req.url)) cache.put(req, res.clone());   // big files are kept in app storage instead
       return isolate(res);
     } catch {
       if (req.mode === 'navigate') { const page = await cache.match('./index.html'); if (page) return isolate(page); }

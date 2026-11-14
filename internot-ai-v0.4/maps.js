@@ -15,7 +15,7 @@ const PLACE_RANK = [0, 1, 2, 4, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13];
 const M = {
   root: null, map: null, mem: null, view: { cx: 0, cy: 0, z: 10 }, w: 0, h: 0,
   gps: null, watch: null, follow: false, start: null, dest: null, pick: null, route: null, nav: null,
-  mute: false, raf: 0, spoken: [], wake: null,
+  mute: false, raf: 0, spoken: [], wake: null, world: null,
 };
 window.internotMap = M;
 
@@ -67,6 +67,26 @@ function prepare(map) {
   return map;
 }
 
+/* ---------- world base map (ships with the app) ---------- */
+async function loadWorld() {
+  try {
+    const w = await (await fetch('./world.json')).json(); const k = TWO32 / w.grid; const path = new Path2D();
+    for (const r of w.rings) { let x = r[0], y = r[1]; path.moveTo(x, y); for (let i = 2; i < r.length; i += 2) { x += r[i]; y += r[i + 1]; path.lineTo(x, y); } path.closePath(); }
+    M.world = { grid: w.grid, path,
+      countries: w.countries.map(([name, x, y, rank]) => ({ name, x: x * k, y: y * k, rank, lower: name.toLowerCase(), kind: 'country' })),
+      cities: w.cities.map(([name, x, y, rank, country, cap]) => ({ name, x: x * k, y: y * k, rank, country, cap, lower: name.toLowerCase(), kind: 'city' })) };
+    draw();
+  } catch (e) { console.warn('world map unavailable', e); }
+}
+const cityMinZ = (c) => c.rank <= 1 ? 3 : c.rank <= 3 ? 4.5 : c.rank <= 5 ? 5.5 : c.rank <= 7 ? 6.5 : 7.5;
+const inDetail = (p) => { const m = M.map; if (!m || m.stub) return false; const [a, b, c, d] = m.bbox; return p.x >= a && p.x <= c && p.y >= b && p.y <= d; };
+function stubMap() {
+  const e = () => new Uint32Array(0);
+  return prepare({ stub: true, name: 'World', built: '', N: 0, W: 0, R: 0, X: e(), Y: e(), wayStart: new Uint32Array(1), wayNodes: e(), wayName: e(),
+    wayClass: new Uint8Array(0), wayFlags: new Uint8Array(0), names: [], places: [], bbox: [0, 0, TWO32 - 1, TWO32 - 1] });
+}
+function showWorld() { M.map = stubMap(); M.view.cx = lonToX(22); M.view.cy = latToY(-8); M.view.z = 2.6; M.needFit = false; showMap(true); resize(); }
+
 async function loadStored() {
   let buf = M.mem;
   if (!buf && M.root) { try { buf = await (await (await M.root.getFileHandle(MAP_FILE)).getFile()).arrayBuffer(); } catch { buf = null; } }
@@ -79,6 +99,24 @@ async function loadStored() {
 function setProgress(frac, label) {
   $('map-progress').hidden = frac == null;
   if (frac != null) { $('map-progress-bar').style.width = Math.round(frac * 100) + '%'; $('map-progress-label').textContent = label || ''; }
+  window.internotLoader?.(frac == null ? null : (label || 'Preparing map') + '…', frac ?? undefined);
+}
+// A ready-made country map that ships with the app (inside the Android app, or beside the web app).
+const BUILT_IN = './maps/lesotho.imap';
+const NATIVE = !!window.Capacitor;
+let builtIn = null;
+function builtInAvailable() { return builtIn ||= fetch(BUILT_IN, { method: 'HEAD' }).then((r) => r.ok && !/html/.test(r.headers.get('content-type') || ''), () => false); }
+async function useBuiltIn() {   // Android app: the file is already on the phone, so read it in place
+  try { const r = await fetch(BUILT_IN); if (!r.ok) return false; const buf = await r.arrayBuffer(); decodeImap(buf); M.mem = buf; return await loadStored(); } catch (e) { console.warn('built-in map unreadable', e); M.mem = null; return false; }
+}
+async function getBuiltIn() {   // web app: one download, then kept on the device
+  $('map-error').textContent = '';
+  try {
+    const r = await fetch(BUILT_IN); if (!r.ok || !r.body) throw new Error('The map could not be downloaded. Check the connection and try again.');
+    const total = Number(r.headers.get('content-length')) || 0; const rd = r.body.getReader(); const parts = []; let n = 0;
+    for (;;) { const { value, done } = await rd.read(); if (done) break; parts.push(value); n += value.byteLength; setProgress(total ? n / total * 0.9 : 0.5, 'Downloading map'); }
+    await importMap(new File(parts, 'lesotho.imap'));
+  } catch (e) { setProgress(null); $('map-error').textContent = e?.message || 'The map could not be downloaded.'; }
 }
 const niceName = (file) => { const b = file.replace(/\.(osm\.pbf|pbf|imap)$/i, '').replace(/-latest$|-\d{6}$/, '').replace(/[-_]+/g, ' ').trim(); return b ? b[0].toUpperCase() + b.slice(1) : 'Map'; };
 
@@ -107,15 +145,17 @@ async function importMap(file) {
 }
 
 async function deleteMap() {
-  endNav(); clearRoute(); M.map = null; M.mem = null;
+  endNav(); clearRoute(); M.map = null; M.mem = null; try { localStorage.setItem('noBuiltInMap', '1'); } catch {}
   try { await M.root?.removeEntry(MAP_FILE); } catch {}
-  showMap(false); renderMapInfo();
+  showWorld(); renderMapInfo();
 }
-function showMap(on) { $('map-empty').hidden = on; $('map-wrap').hidden = !on; }
+function showMap() { $('map-wrap').hidden = false; }
 function renderMapInfo() {
   const el = $('map-info'); if (!el) return;
-  el.textContent = M.map ? `${M.map.name} · ${M.map.W.toLocaleString()} roads · ${M.map.placeList.length.toLocaleString()} places · map data from ${M.map.built}` : 'No map on this device yet.';
-  $('map-delete').hidden = !M.map; $('map-replace').hidden = !M.map;
+  const real = M.map && !M.map.stub;
+  el.textContent = real ? `${M.map.name} · ${M.map.W.toLocaleString()} roads · ${M.map.placeList.length.toLocaleString()} places · map data from ${M.map.built}` : 'World map only. Add a country map below for streets, villages and directions.';
+  $('map-delete').hidden = !real; $('map-replace').hidden = true;
+  builtInAvailable().then((ok) => { $('map-get').hidden = real || !ok; });
 }
 
 /* ---------- drawing ---------- */
@@ -131,10 +171,14 @@ function draw() { if (!M.raf) M.raf = requestAnimationFrame(() => { M.raf = 0; p
 function paint() {
   const map = M.map, c = $('map-canvas'); if (!map || !M.w) return;
   const ctx = c.getContext('2d'); ctx.setTransform(M.dpr, 0, 0, M.dpr, 0, 0);
-  ctx.fillStyle = '#f3f0e7'; ctx.fillRect(0, 0, M.w, M.h);
   const u = upp(), z = M.view.z, { X, Y, wayStart, wayNodes, wayClass, box, W } = map;
   const x0 = M.view.cx - M.w / 2 * u, x1 = M.view.cx + M.w / 2 * u, y0 = M.view.cy - M.h / 2 * u, y1 = M.view.cy + M.h / 2 * u;
   const ox = M.w / 2 - M.view.cx / u, oy = M.h / 2 - M.view.cy / u;
+  const wd = M.world; ctx.fillStyle = wd ? '#d3e3ee' : '#f3f0e7'; ctx.fillRect(0, 0, M.w, M.h);
+  if (wd) {   // land and country borders, drawn from one cached outline
+    const s = TWO32 / wd.grid / u; ctx.save(); ctx.setTransform(M.dpr * s, 0, 0, M.dpr * s, M.dpr * ox, M.dpr * oy);
+    ctx.fillStyle = '#f3f0e7'; ctx.fill(wd.path); ctx.lineWidth = 1.1 / s; ctx.strokeStyle = '#bfb39a'; ctx.stroke(wd.path); ctx.restore();
+  }
   const paths = []; const minSize = 1.5 * u;
   for (let w = 0; w < W; w++) {
     const cls = wayClass[w]; const slot = cls >= 20 ? 9 : cls;
@@ -177,6 +221,18 @@ function paint() {
     if (poi) { ctx.fillStyle = '#c15f3c'; ctx.beginPath(); ctx.arc(sx, sy, 3.5, 0, 7); ctx.fill(); }
     ctx.strokeStyle = 'rgba(243,240,231,.92)'; ctx.lineWidth = 4; ctx.strokeText(p.name, tx, sy);
     ctx.fillStyle = poi ? '#7a4a36' : '#2b2a27'; ctx.fillText(p.name, tx, sy);
+  }
+
+  if (wd) {
+    const label = (p, font, col) => {
+      if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) return; const sx = p.x / u + ox, sy = p.y / u + oy; ctx.font = font;
+      const tw = ctx.measureText(p.name).width; const city = p.kind === 'city'; const tx = city ? sx + 7 : sx - tw / 2; const rect = [tx - 3, sy - 9, tx + tw + 3, sy + 9];
+      if (used.some((q) => rect[0] < q[2] && rect[2] > q[0] && rect[1] < q[3] && rect[3] > q[1])) return; used.push(rect);
+      if (city) { ctx.fillStyle = p.cap ? '#c15f3c' : '#6b6860'; ctx.beginPath(); ctx.arc(sx, sy, p.cap ? 3.5 : 2.5, 0, 7); ctx.fill(); }
+      ctx.strokeStyle = 'rgba(243,240,231,.92)'; ctx.lineWidth = 4; ctx.strokeText(p.name, tx, sy); ctx.fillStyle = col; ctx.fillText(p.name, tx, sy);
+    };
+    if (z < 7.5) for (const c of wd.countries) { if (c.rank <= z + 0.5 && used.length < 60) label(c, '600 13px system-ui, sans-serif', '#7a4a36'); }
+    for (const c of wd.cities) { if (z >= cityMinZ(c) && used.length < 90 && !inDetail(c)) label(c, '12px system-ui, sans-serif', '#2b2a27'); }
   }
 
   const dot = (pt, fill, ring, r = 8) => { const sx = toSX(pt.x), sy = toSY(pt.y); ctx.beginPath(); ctx.arc(sx, sy, r, 0, 7); ctx.fillStyle = fill; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = ring; ctx.stroke(); };
@@ -360,9 +416,10 @@ function msg(text) { const el = $('map-msg'); el.textContent = text; el.hidden =
 function button(label, cls, fn) { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; if (cls) b.className = cls; b.onclick = fn; return b; }
 
 function directions() {
+  if (M.map.stub) { msg('Directions need a country street map. Add one under Setup.'); return; }
   const from = M.start || M.gps;
   if (!from) { M.waitingRoute = true; ensureGps(); msg('Waiting for GPS… Or tap where you are and choose “Start from here”.'); renderSheet(); return; }
-  if (!makeRoute(from, M.dest)) { clearRoute(); msg('No road route was found between these two points.'); }
+  if (!makeRoute(from, M.dest)) { clearRoute(); msg(M.map.stub ? 'Directions need a country street map. Add one under Setup.' : 'No road route was found between these two points. Directions work inside ' + M.map.name + '.'); }
   renderSheet(); draw();
 }
 
@@ -393,6 +450,7 @@ function pickAt(x, y, label) {
   if (!label) {
     const u = upp(); let best = null, bd = 30 * u;
     for (const p of M.map.placeList) { if (M.view.z < PLACE_MINZ[p.t]) continue; const d = Math.hypot(p.x - x, p.y - y); if (d < bd) { bd = d; best = p; } }
+    if (!best && M.world) for (const p of M.world.cities) { if (M.view.z < cityMinZ(p)) continue; const d = Math.hypot(p.x - x, p.y - y); if (d < bd) { bd = d; best = p; } }
     if (best) { x = best.x; y = best.y; label = best.name; } else label = 'Dropped pin';
   }
   clearRoute(); M.dest = null; M.pick = { x, y, label }; renderSheet(); draw();
@@ -400,11 +458,15 @@ function pickAt(x, y, label) {
 
 /* ---------- search ---------- */
 function search(q) {
-  const box = $('map-results'); box.textContent = ''; q = q.trim().toLowerCase(); if (!q || !M.map) { box.hidden = true; return; }
+  const box = $('map-results'); box.textContent = ''; q = q.trim().toLowerCase(); if (q.length < 2 || !M.map) { box.hidden = true; return; }
   const hits = M.map.placeList.filter((p) => p.lower.includes(q)).sort((a, b) => (b.lower.startsWith(q) - a.lower.startsWith(q)) || (PLACE_RANK[a.t] - PLACE_RANK[b.t])).slice(0, 12);
+  if (M.world && hits.length < 12) {   // then countries and cities of the world
+    const rank = (a, b) => (b.lower.startsWith(q) - a.lower.startsWith(q)) || (a.rank - b.rank);
+    for (const p of [...M.world.countries.filter((c) => c.lower.includes(q)).sort(rank), ...M.world.cities.filter((c) => c.lower.includes(q) && !inDetail(c)).sort(rank)].slice(0, 12 - hits.length)) hits.push(p);
+  }
   for (const p of hits) {
-    const li = document.createElement('li'); li.textContent = p.name; const sm = document.createElement('small'); sm.textContent = PLACE_TYPES[p.t].replace('_', ' '); li.append(sm);
-    li.onclick = () => { box.hidden = true; $('map-search').value = p.name; $('map-search').blur(); M.follow = false; M.view.cx = p.x; M.view.cy = p.y; M.view.z = Math.max(M.view.z, p.t <= 1 ? 13 : 15.5); pickAt(p.x, p.y, p.name); };
+    const li = document.createElement('li'); li.textContent = p.name; const sm = document.createElement('small'); sm.textContent = p.kind === 'country' ? 'country' : p.kind ? (p.cap ? 'capital · ' : 'city · ') + p.country : PLACE_TYPES[p.t].replace('_', ' '); li.append(sm);
+    li.onclick = () => { box.hidden = true; $('map-search').value = p.name; $('map-search').blur(); M.follow = false; M.view.cx = p.x; M.view.cy = p.y; M.view.z = p.kind === 'country' ? 5 : p.kind ? 9 : Math.max(M.view.z, p.t <= 1 ? 13 : 15.5); pickAt(p.x, p.y, p.name); };
     box.append(li);
   }
   if (!hits.length) { const li = document.createElement('li'); li.textContent = 'No place with that name on this map'; li.className = 'none'; box.append(li); }
@@ -414,7 +476,7 @@ function search(q) {
 /* ---------- touch ---------- */
 function wireCanvas() {
   const c = $('map-canvas'); const pts = new Map(); let moved = 0, downAt = 0, pinch = 0;
-  const zoomAt = (sx, sy, dz) => { const before = fromS(sx, sy); M.view.z = Math.min(19, Math.max(5, M.view.z + dz)); const after = fromS(sx, sy); M.view.cx += before.x - after.x; M.view.cy += before.y - after.y; draw(); };
+  const zoomAt = (sx, sy, dz) => { const before = fromS(sx, sy); M.view.z = Math.min(19, Math.max(1.5, M.view.z + dz)); const after = fromS(sx, sy); M.view.cx += before.x - after.x; M.view.cy += before.y - after.y; draw(); };
   const local = (e) => { const r = c.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
   c.addEventListener('pointerdown', (e) => { c.setPointerCapture(e.pointerId); pts.set(e.pointerId, local(e)); if (pts.size === 1) { moved = 0; downAt = Date.now(); } pinch = 0; });
   c.addEventListener('pointermove', (e) => {
@@ -436,7 +498,12 @@ export async function initMaps(root) {
   const onFile = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) await importMap(f); };
   $('map-file').onchange = onFile; $('map-file-2').onchange = onFile;
   $('map-delete').onclick = () => { if (confirm('Delete the map from this device?')) deleteMap(); };
-  try { await loadStored(); } catch (e) { console.warn('stored map unreadable', e); }
+  let ok = false; try { ok = await loadStored(); } catch (e) { console.warn('stored map unreadable', e); }
+  let off = false; try { off = !!localStorage.getItem('noBuiltInMap'); } catch {}
+  if (!ok && NATIVE && !off) ok = await useBuiltIn();
+  if (!ok) showWorld();
+  $('map-get').onclick = () => { try { localStorage.removeItem('noBuiltInMap'); } catch {} return NATIVE ? useBuiltIn().then(renderMapInfo) : getBuiltIn(); };
+  loadWorld();
   renderMapInfo();
 }
 M.api = { makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint };

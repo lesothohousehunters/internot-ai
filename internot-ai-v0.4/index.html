@@ -10,8 +10,14 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+<div id="boot" class="boot" role="status" aria-live="polite">
+  <svg class="logo blink" viewBox="0 0 512 512" width="112" height="112" aria-hidden="true"><mask id="lg0"><rect width="512" height="512" fill="#fff"/><rect x="206" width="100" height="512" fill="#000"/></mask><g mask="url(#lg0)" fill="none" stroke="#d97757" stroke-width="42" stroke-linecap="round"><path d="M72 241A240 240 0 0 1 440 241"/><path d="M130 289A165 165 0 0 1 382 289"/><path d="M187 337A90 90 0 0 1 325 337"/></g><g class="bang" fill="#d97757"><rect x="228" y="100" width="56" height="236" rx="28"/><circle cx="256" cy="396" r="33"/></g></svg>
+  <b>Internot AI</b>
+  <div id="boot-text">Starting…</div>
+  <div id="boot-progress" class="progress" hidden><div id="boot-bar"></div></div>
+</div>
 <header class="bar">
-  <div class="brand"><img src="icon.svg" alt="" width="26" height="26"><span>Internot AI</span></div>
+  <div class="brand"><svg id="brand-logo" class="logo" viewBox="0 0 512 512" width="28" height="28" aria-hidden="true"><mask id="lg1"><rect width="512" height="512" fill="#fff"/><rect x="206" width="100" height="512" fill="#000"/></mask><g mask="url(#lg1)" fill="none" stroke="#d97757" stroke-width="42" stroke-linecap="round"><path d="M72 241A240 240 0 0 1 440 241"/><path d="M130 289A165 165 0 0 1 382 289"/><path d="M187 337A90 90 0 0 1 325 337"/></g><g class="bang" fill="#d97757"><rect x="228" y="100" width="56" height="236" rx="28"/><circle cx="256" cy="396" r="33"/></g></svg><span>Internot AI</span></div>
   <div id="status" class="status" role="status">Starting…</div>
 </header>
 
@@ -33,28 +39,14 @@
 
   <!-- MAPS -->
   <section id="view-map" class="view" aria-label="Maps">
-    <div id="map-empty" class="pad">
-      <h2>Offline maps</h2>
-      <div class="card">
-        <p><b>Add a map once, then navigate with no data.</b></p>
-        <ol class="howto">
-          <li>On Wi‑Fi, open <a href="https://download.geofabrik.de/africa/lesotho.html" target="_blank" rel="noopener">download.geofabrik.de → Africa → Lesotho</a> and download the file ending in <code>.osm.pbf</code>. Any other country works the same way.</li>
-          <li>Tap the button below and choose that file. The phone turns it into a map, which takes a minute or two.</li>
-        </ol>
-        <div class="row wrap"><label class="button primary">Add map file<input id="map-file" type="file" accept=".pbf,.imap,application/octet-stream" hidden></label></div>
-        <div id="map-progress" hidden><div class="progress"><div id="map-progress-bar"></div></div><p id="map-progress-label" class="hint"></p></div>
-        <p id="map-error" class="hint err"></p>
-        <p class="hint">Map data © OpenStreetMap contributors.</p>
-      </div>
-    </div>
-    <div id="map-wrap" hidden>
+    <div id="map-wrap">
       <canvas id="map-canvas"></canvas>
       <div id="map-search-box" class="map-search"><input id="map-search" type="search" placeholder="Search towns, villages, clinics…" autocomplete="off"><ul id="map-results" hidden></ul></div>
       <div id="nav-banner" class="nav-banner" hidden><div id="nav-dist"></div><div id="nav-next"></div><small id="nav-left"></small></div>
       <div class="map-btns"><button id="map-zoom-in" type="button" aria-label="Zoom in">+</button><button id="map-zoom-out" type="button" aria-label="Zoom out">−</button><button id="map-locate" type="button" aria-label="Show my location">◎</button></div>
       <div id="map-msg" class="map-msg" hidden></div>
       <div id="map-sheet" class="map-sheet" hidden></div>
-      <div class="map-attrib">© OpenStreetMap contributors</div>
+      <div class="map-attrib">© OpenStreetMap contributors · Natural Earth</div>
     </div>
   </section>
 
@@ -134,11 +126,11 @@
 
     <h2>Settings</h2>
     <div class="card settings">
-      <label><input type="checkbox" id="set-cool"> <span><b>Cool‑down pauses</b><small>Rest 2 seconds after every block of text to limit heat and battery wear.</small></span></label>
+      <label><input type="checkbox" id="set-cool"> <span><b>Cool‑down pauses</b><small>Rest 2 seconds after every block of text to limit heat and battery wear. Answers take longer.</small></span></label>
       <label><input type="checkbox" id="set-unload"> <span><b>Free memory when I leave</b><small>Unload the model one minute after the app goes to the background.</small></span></label>
       <label><input type="checkbox" id="set-gpu"> <span><b>Use graphics chip (experimental)</b><small>Faster on some phones, unstable on others. Applies next time the model loads.</small></span></label>
       <label class="stack"><span><b>Longest answer</b><small>In tokens (roughly ¾ of a word each).</small></span>
-        <select id="set-max"><option>256</option><option>512</option><option>1024</option></select></label>
+        <select id="set-max"><option>128</option><option>256</option><option>512</option><option>1024</option></select></label>
       <label class="stack"><span><b>Instructions for The Brain</b></span>
         <textarea id="set-system" rows="3"></textarea></label>
       <div class="row wrap"><button id="clear-chat" type="button" class="danger">Clear chat history</button></div>
@@ -147,8 +139,14 @@
     <h2>Device check</h2>
     <div id="device" class="card device"></div>
 
-    <h2>Map</h2>
-    <div class="card"><div id="map-info" class="model-info">No map on this device yet.</div>
+    <h2>Maps</h2>
+    <div class="card"><div id="map-info" class="model-info">World map only.</div>
+      <p class="hint">The world map is always here. A country map adds every street, village and clinic, and turn-by-turn directions.</p>
+      <div class="row wrap"><button id="map-get" type="button" class="primary" hidden>Get the Lesotho street map</button>
+        <label class="button">Add a country map file<input id="map-file" type="file" accept=".pbf,.imap,application/octet-stream" hidden></label></div>
+      <div id="map-progress" hidden><div class="progress"><div id="map-progress-bar"></div></div><p id="map-progress-label" class="hint"></p></div>
+      <p id="map-error" class="hint err"></p>
+      <details><summary>Where to get other countries</summary><p class="hint">On Wi‑Fi, open <a href="https://download.geofabrik.de/" target="_blank" rel="noopener">download.geofabrik.de</a>, choose a country and download the file ending in <code>.osm.pbf</code>. Then tap “Add a country map file” and choose it. Map data © OpenStreetMap contributors. World map: Natural Earth.</p></details>
       <div class="row wrap"><label id="map-replace" class="button" hidden>Replace map<input id="map-file-2" type="file" accept=".pbf,.imap,application/octet-stream" hidden></label><button id="map-delete" type="button" class="danger" hidden>Delete map</button></div></div>
   </section>
 </main>

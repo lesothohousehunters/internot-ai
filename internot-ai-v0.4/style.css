@@ -48,7 +48,7 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 5px; }
 .row { display: flex; gap: 8px; align-items: flex-end; }
 .row.wrap { flex-wrap: wrap; margin-top: 10px; }
 
-textarea, input[type=text], input[type=url], select {
+textarea, input[type=text], input[type=url], input[type=search], select {
   width: 100%; background: var(--panel); color: var(--text); border: 1px solid var(--line);
   border-radius: 10px; padding: 10px 12px; font: inherit; resize: none;
 }
@@ -132,3 +132,12 @@ a { color: var(--accent-deep); }
 #link-video { width: 100%; max-height: 300px; border-radius: 12px; background: #000; margin-top: 8px; object-fit: cover; }
 .overlay details { margin-top: 12px; } .overlay details textarea { margin-top: 8px; }
 .tabs button { font-size: 14px; }
+
+/* loader: the logo with a blinking exclamation mark */
+.logo { display: block; flex: none; }
+.logo.blink .bang { animation: bang .9s ease-in-out infinite; }
+@keyframes bang { 0%, 100% { opacity: 1; } 50% { opacity: .08; } }
+.boot { position: fixed; inset: 0; z-index: 100; background: var(--bg, #f0eee6); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; text-align: center; }
+.boot[hidden] { display: none; }
+.boot b { font-size: 22px; } .boot #boot-text { color: var(--muted); min-height: 1.3em; } .boot .progress { width: 240px; max-width: 70vw; }
+.msg .think { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
