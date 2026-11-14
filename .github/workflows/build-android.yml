@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
     paths: ['internot-ai-v0.4/**', 'android/**', 'update/**', '.github/workflows/build-android.yml']
+concurrency:
+  group: build
+  cancel-in-progress: true
 permissions:
   contents: write
 jobs:
@@ -40,7 +43,12 @@ jobs:
             ls -la /tmp/l.pbf
             node $A/tools-build-map.mjs /tmp/l.pbf $A/maps/lesotho.imap Lesotho
           fi
-          ls -la $A $A/maps
+          if [ ! -f $A/lib/wllama/compat/wllama.wasm ]; then
+            mkdir -p $A/lib/wllama/compat /tmp/compat
+            (cd /tmp/compat && npm pack @wllama/wllama-compat@3.13.0 && tar xzf wllama-wllama-compat-3.13.0.tgz)
+            cp /tmp/compat/package/wasm/wllama.js /tmp/compat/package/wasm/wllama.wasm $A/lib/wllama/compat/
+          fi
+          ls -la $A $A/maps $A/lib/wllama/compat
           test $(stat -c %s $A/maps/lesotho.imap) -lt 95000000
           git add -A
           git diff --cached --quiet || { git commit -m "Update app and built-in map data"; git push; }
@@ -48,14 +56,19 @@ jobs:
         run: |
           mkdir build && cd build
           npm init -y
-          npm i @capacitor/core@8 @capacitor/cli@8 @capacitor/android@8
+          npm i @capacitor/core@8 @capacitor/cli@8 @capacitor/android@8 @capacitor-community/text-to-speech@8
           mkdir www && cp -r ../internot-ai-v0.4/. www/
           rm -f www/sw.js www/README.md www/tools-build-map.mjs www/tools-build-world.mjs
+          cp node_modules/@capacitor/core/dist/capacitor.js www/
+          sed -i 's#<script src="lib/qrcode.js"></script>#<script src="capacitor.js"></script><script src="lib/qrcode.js"></script>#' www/index.html
+          grep -c capacitor.js www/index.html
           npx cap init "Internot AI" org.internot.app --web-dir www
           npx cap add android
+          cp ../android/MainActivity.java ../android/NearbyPlugin.java android/app/src/main/java/org/internot/app/
+          sed -i 's#^dependencies {#dependencies {\n    implementation "com.google.android.gms:play-services-nearby:19.3.0"#' android/app/build.gradle
           M=android/app/src/main/AndroidManifest.xml
           P='<uses-permission android:name="android.permission.'
-          sed -i "s#<application#${P}CAMERA\"/>${P}ACCESS_FINE_LOCATION\"/>${P}ACCESS_COARSE_LOCATION\"/>${P}WAKE_LOCK\"/>${P}CHANGE_WIFI_MULTICAST_STATE\"/><uses-feature android:name=\"android.hardware.camera\" android:required=\"false\"/><application#" $M
+          sed -i "s#<application#${P}CAMERA\"/>${P}ACCESS_FINE_LOCATION\"/>${P}ACCESS_COARSE_LOCATION\"/>${P}WAKE_LOCK\"/>${P}CHANGE_WIFI_MULTICAST_STATE\"/>${P}BLUETOOTH\"/>${P}BLUETOOTH_ADMIN\"/>${P}BLUETOOTH_SCAN\"/>${P}BLUETOOTH_ADVERTISE\"/>${P}BLUETOOTH_CONNECT\"/>${P}NEARBY_WIFI_DEVICES\"/>${P}ACCESS_WIFI_STATE\"/>${P}CHANGE_WIFI_STATE\"/><uses-feature android:name=\"android.hardware.camera\" android:required=\"false\"/><application#" $M
           sed -i 's#^android {#android {\n    androidResources { noCompress += ["gguf", "imap"] }#' android/app/build.gradle
           R=android/app/src/main/res
           rm -rf $R/mipmap-anydpi-v26
@@ -75,10 +88,39 @@ jobs:
           npx cap sync android
           (cd android && ./gradlew assembleDebug --no-daemon)
           cp android/app/build/outputs/apk/debug/app-debug.apk ../internot-ai-full.apk
+      - name: Test build (the full app plus a self-test script)
+        run: |
+          cd build
+          cp ../android/selftest.js www/
+          sed -i 's#</body>#<script src="selftest.js"></script></body>#' www/index.html
+          npx cap sync android
+          (cd android && ./gradlew assembleDebug --no-daemon)
+          cp android/app/build/outputs/apk/debug/app-debug.apk ../internot-ai-test.apk
+          cd .. && rm -rf build ~/.gradle/caches && df -h / | tail -1
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run the app on an Android emulator
+        continue-on-error: true
+        timeout-minutes: 35
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          ram-size: 4096M
+          disk-size: 8G
+          cores: 3
+          disable-animations: true
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
+          script: bash android/emulator-test.sh
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           ls -la *.apk
           gh release delete latest -y --cleanup-tag || true
-          gh release create latest internot-ai-full.apk internot-ai.apk --title "Internot AI for Android" --notes "internot-ai-full.apk: everything inside (AI model, world map, Lesotho street map). Install and use with no internet. internot-ai.apk: the same without the AI model."
+          mkdir -p test-out && echo "built $(date -u)" > test-out/built.txt
+          gh release create latest internot-ai-full.apk internot-ai.apk test-out/* --title "Internot AI for Android" --notes "internot-ai-full.apk: everything inside (AI model, world map, Lesotho street map). Install and use with no internet. internot-ai.apk: the same without the AI model. The other files are the automatic test report and screenshots from an Android emulator."
