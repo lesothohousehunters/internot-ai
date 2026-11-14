@@ -174,10 +174,10 @@ function paint() {
   const u = upp(), z = M.view.z, { X, Y, wayStart, wayNodes, wayClass, box, W } = map;
   const x0 = M.view.cx - M.w / 2 * u, x1 = M.view.cx + M.w / 2 * u, y0 = M.view.cy - M.h / 2 * u, y1 = M.view.cy + M.h / 2 * u;
   const ox = M.w / 2 - M.view.cx / u, oy = M.h / 2 - M.view.cy / u;
-  const wd = M.world; ctx.fillStyle = wd ? '#d3e3ee' : '#f3f0e7'; ctx.fillRect(0, 0, M.w, M.h);
+  const wd = M.world, sea = wd && z < 9; ctx.fillStyle = sea ? '#d3e3ee' : '#f3f0e7';   // zoomed in, the sea fill is skipped: it is not accurate enough at street level ctx.fillRect(0, 0, M.w, M.h);
   if (wd) {   // land and country borders, drawn from one cached outline
     const s = TWO32 / wd.grid / u; ctx.save(); ctx.setTransform(M.dpr * s, 0, 0, M.dpr * s, M.dpr * ox, M.dpr * oy);
-    ctx.fillStyle = '#f3f0e7'; ctx.fill(wd.path); ctx.lineWidth = 1.1 / s; ctx.strokeStyle = '#bfb39a'; ctx.stroke(wd.path); ctx.restore();
+    if (sea) { ctx.fillStyle = '#f3f0e7'; ctx.fill(wd.path); } ctx.lineWidth = 1.1 / s; ctx.strokeStyle = '#bfb39a'; ctx.stroke(wd.path); ctx.restore();
   }
   const paths = []; const minSize = 1.5 * u;
   for (let w = 0; w < W; w++) {
