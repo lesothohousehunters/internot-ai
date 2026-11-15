@@ -1,0 +1,43 @@
+diff --git a/android/brain/CMakeLists.txt b/android/brain/CMakeLists.txt
+index 7ffab7e..d079ce1 100644
+--- a/android/brain/CMakeLists.txt
++++ b/android/brain/CMakeLists.txt
+@@ -14 +14,5 @@ set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+-set(GGML_LLAMAFILE ON CACHE BOOL "" FORCE)
++if (ANDROID_ABI STREQUAL "armeabi-v7a")
++  set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)   # its fast matrix code needs 64-bit ARM half-float support
++else()
++  set(GGML_LLAMAFILE ON CACHE BOOL "" FORCE)
++endif()
+diff --git a/internot-ai-v0.4/maps.js b/internot-ai-v0.4/maps.js
+index e4b1521..0c87977 100644
+--- a/internot-ai-v0.4/maps.js
++++ b/internot-ai-v0.4/maps.js
+@@ -176,2 +176,2 @@ function draw() { if (!M.raf) M.raf = requestAnimationFrame(() => { M.raf = 0; p
+-const SAT = { tiles: new Map(), local: null, remoteMax: 14, url: (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2016_3857/default/g/${z}/${y}/${x}.jpg` };
+-const SAT_CREDIT = 'Sentinel-2 cloudless – s2maps.eu by EOX IT Services GmbH (contains modified Copernicus Sentinel data 2016 & 2017)';
++const SAT = { tiles: new Map(), local: null, remoteMax: 14, url: (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/${SAT.local?.layer || 's2cloudless_3857'}/default/g/${z}/${y}/${x}.jpg` };
++const satCredit = () => `Sentinel-2 cloudless – s2maps.eu by EOX IT Services GmbH (contains modified Copernicus Sentinel data ${SAT.local?.year || '2016'})`;
+@@ -216 +216 @@ function setSat(on) {
+-  $('map-attrib').textContent = '© OpenStreetMap contributors · Natural Earth' + (on ? ' · ' + SAT_CREDIT : '');
++  $('map-attrib').textContent = '© OpenStreetMap contributors · Natural Earth' + (on ? ' · ' + satCredit() : '');
+diff --git a/internot-ai-v0.4/tools-fetch-sat.mjs b/internot-ai-v0.4/tools-fetch-sat.mjs
+index c242fbb..009037d 100644
+--- a/internot-ai-v0.4/tools-fetch-sat.mjs
++++ b/internot-ai-v0.4/tools-fetch-sat.mjs
+@@ -10 +10,8 @@ const latToY = (lat) => { const s = Math.sin(lat * Math.PI / 180); return Math.m
+-const url = (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2016_3857/default/g/${z}/${y}/${x}.jpg`;
++// The 2016 pictures are free to share with credit (CC BY 4.0); later years are tried only if those are gone.
++const LAYERS = [['s2cloudless_3857', '2016'], ['s2cloudless-2016_3857', '2016'], ['s2cloudless-2017_3857', '2017'], ['s2cloudless-2020_3857', '2020']];
++let layer = LAYERS[0][0], year = LAYERS[0][1];
++const url = (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/${layer}/default/g/${z}/${y}/${x}.jpg`;
++const get = (u) => fetch(u, { signal: AbortSignal.timeout(20000), headers: { 'user-agent': 'internot-ai-build (open source offline map app)' } });
++{ const n = 2 ** 12, px = Math.floor((((+a + +c) / 2) + 180) / 360 * n), lat = ((+b + +d) / 2) * Math.PI / 180, py = Math.floor((1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2 * n); let found = false;
++  for (const [l, y] of LAYERS) { layer = l; try { const r = await get(url(12, px, py)); console.log(`probe ${l}: HTTP ${r.status}`); if (r.ok && (await r.arrayBuffer()).byteLength > 500) { year = y; found = true; break; } } catch (e) { console.log(`probe ${l}: ${e.message}`); } }
++  if (!found) { console.error('no satellite layer answered'); process.exit(1); } console.log(`using ${layer} (${year})`); }
+@@ -24 +31 @@ async function worker() {
+-        const r = await fetch(url(z, x, y)); if (!r.ok) throw new Error('HTTP ' + r.status);
++        const r = await get(url(z, x, y)); if (!r.ok) throw new Error('HTTP ' + r.status);
+@@ -34 +41 @@ if (failed > done * 0.03) { rmSync(out, { recursive: true, force: true }); conso
+-writeFileSync(`${out}/index.json`, JSON.stringify({ name, box, world, max, count: done - failed }));
++writeFileSync(`${out}/index.json`, JSON.stringify({ name, box, world, max, count: done - failed, layer, year }));
