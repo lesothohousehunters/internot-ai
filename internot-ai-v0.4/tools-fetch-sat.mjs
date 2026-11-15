@@ -7,7 +7,14 @@ const [, , out, name = 'Lesotho', a = '26.9', b = '-30.75', c = '29.6', d = '-28
 const box = [+a, +b, +c, +d], world = 4, max = +maxZ, TWO32 = 4294967296;
 const lonToX = (lon) => Math.min(TWO32 - 1, Math.max(0, Math.round((lon + 180) / 360 * TWO32)));
 const latToY = (lat) => { const s = Math.sin(lat * Math.PI / 180); return Math.min(TWO32 - 1, Math.max(0, Math.round((0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * TWO32))); };
-const url = (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2016_3857/default/g/${z}/${y}/${x}.jpg`;
+// The 2016 pictures are free to share with credit (CC BY 4.0); later years are tried only if those are gone.
+const LAYERS = [['s2cloudless_3857', '2016'], ['s2cloudless-2016_3857', '2016'], ['s2cloudless-2017_3857', '2017'], ['s2cloudless-2020_3857', '2020']];
+let layer = LAYERS[0][0], year = LAYERS[0][1];
+const url = (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/${layer}/default/g/${z}/${y}/${x}.jpg`;
+const get = (u) => fetch(u, { signal: AbortSignal.timeout(20000), headers: { 'user-agent': 'internot-ai-build (open source offline map app)' } });
+{ const n = 2 ** 12, px = Math.floor((((+a + +c) / 2) + 180) / 360 * n), lat = ((+b + +d) / 2) * Math.PI / 180, py = Math.floor((1 - Math.log(Math.tan(lat) + 1 / Math.cos(lat)) / Math.PI) / 2 * n); let found = false;
+  for (const [l, y] of LAYERS) { layer = l; try { const r = await get(url(12, px, py)); console.log(`probe ${l}: HTTP ${r.status}`); if (r.ok && (await r.arrayBuffer()).byteLength > 500) { year = y; found = true; break; } } catch (e) { console.log(`probe ${l}: ${e.message}`); } }
+  if (!found) { console.error('no satellite layer answered'); process.exit(1); } console.log(`using ${layer} (${year})`); }
 const jobs = [];
 for (let z = 0; z <= max; z++) {
   const n = 2 ** z, t = (v) => Math.floor(v / TWO32 * n);
@@ -21,7 +28,7 @@ async function worker() {
     const [z, x, y] = job; let ok = false;
     for (let tries = 0; tries < 3 && !ok; tries++) {
       try {
-        const r = await fetch(url(z, x, y)); if (!r.ok) throw new Error('HTTP ' + r.status);
+        const r = await get(url(z, x, y)); if (!r.ok) throw new Error('HTTP ' + r.status);
         const buf = Buffer.from(await r.arrayBuffer()); if (buf.length < 200) throw new Error('empty');
         mkdirSync(`${out}/${z}/${x}`, { recursive: true }); writeFileSync(`${out}/${z}/${x}/${y}.jpg`, buf); bytes += buf.length; ok = true;
       } catch (e) { if (tries === 2) { failed++; if (failed < 6) console.log(`failed ${z}/${x}/${y}: ${e.message}`); } else await new Promise((r) => setTimeout(r, 800)); }
@@ -31,5 +38,5 @@ async function worker() {
 }
 await Promise.all(Array.from({ length: 6 }, worker));
 if (failed > done * 0.03) { rmSync(out, { recursive: true, force: true }); console.error(`too many failures (${failed}), nothing kept`); process.exit(1); }
-writeFileSync(`${out}/index.json`, JSON.stringify({ name, box, world, max, count: done - failed }));
+writeFileSync(`${out}/index.json`, JSON.stringify({ name, box, world, max, count: done - failed, layer, year }));
 console.log(`${done - failed} pictures, ${(bytes / 1048576).toFixed(1)} MB`);

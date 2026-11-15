@@ -11,7 +11,11 @@ set(LLAMA_BUILD_MTMD OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)        # must run on every phone, not just the build machine
 set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
-set(GGML_LLAMAFILE ON CACHE BOOL "" FORCE)
+if (ANDROID_ABI STREQUAL "armeabi-v7a")
+  set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)   # its fast matrix code needs 64-bit ARM half-float support
+else()
+  set(GGML_LLAMAFILE ON CACHE BOOL "" FORCE)
+endif()
 add_subdirectory(${LLAMA_DIR} llama)
 if (ANDROID)
   add_library(internotbrain SHARED brain.cpp jni.cpp)

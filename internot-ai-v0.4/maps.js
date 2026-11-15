@@ -173,8 +173,8 @@ function draw() { if (!M.raf) M.raf = requestAnimationFrame(() => { M.raf = 0; p
 /* ---------- satellite pictures ---------- */
 // Built in: the whole world from far out, and Lesotho closer in. Anything else is fetched when there is
 // internet and kept on the phone, so places you have looked at once stay visible offline.
-const SAT = { tiles: new Map(), local: null, remoteMax: 14, url: (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2016_3857/default/g/${z}/${y}/${x}.jpg` };
-const SAT_CREDIT = 'Sentinel-2 cloudless – s2maps.eu by EOX IT Services GmbH (contains modified Copernicus Sentinel data 2016 & 2017)';
+const SAT = { tiles: new Map(), local: null, remoteMax: 14, url: (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/${SAT.local?.layer || 's2cloudless_3857'}/default/g/${z}/${y}/${x}.jpg` };
+const satCredit = () => `Sentinel-2 cloudless – s2maps.eu by EOX IT Services GmbH (contains modified Copernicus Sentinel data ${SAT.local?.year || '2016'})`;
 async function satInit() { try { const r = await fetch('./sat/index.json'); if (r.ok) { SAT.local = await r.json(); if (M.sat) draw(); } } catch {} }
 function satLocal(z, x, y) {
   const L = SAT.local; if (!L) return false; if (z <= L.world) return true; if (z > L.max) return false; const n = 2 ** z, t = (v) => Math.floor(v / TWO32 * n);
@@ -213,7 +213,7 @@ function paintSat(ctx, u, z, ox, oy, x0, y0, x1, y1) {
 function setSat(on) {
   M.sat = on; try { localStorage.setItem('mapSat', on ? '1' : ''); } catch {}
   $('map-layer').textContent = on ? 'Map' : 'Sat'; $('map-layer').setAttribute('aria-label', on ? 'Show the street map' : 'Show satellite pictures');
-  $('map-attrib').textContent = '© OpenStreetMap contributors · Natural Earth' + (on ? ' · ' + SAT_CREDIT : '');
+  $('map-attrib').textContent = '© OpenStreetMap contributors · Natural Earth' + (on ? ' · ' + satCredit() : '');
   if (on && !navigator.onLine && M.view.z > (SAT.local ? SAT.local.max : 0) + 1.5) msg('Offline, satellite pictures are sharp for Lesotho and for places you looked at while online.');
   draw();
 }
