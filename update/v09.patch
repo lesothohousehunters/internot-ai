@@ -1,0 +1,22 @@
+diff --git a/android/fetch-libs.sh b/android/fetch-libs.sh
+index 48c734e..980a33f 100644
+--- a/android/fetch-libs.sh
++++ b/android/fetch-libs.sh
+@@ -11 +11 @@ cp x/tesseract.js-core*/package/tesseract-core-lstm.wasm.js x/tesseract.js-core*
+-cp x/tesseract.js-data*/package/4.0.0_best_int/eng.traineddata.gz "$A/lib/ocr/"
++gunzip -c x/tesseract.js-data*/package/4.0.0_best_int/eng.traineddata.gz > "$A/lib/ocr/eng.traineddata"
+diff --git a/internot-ai-v0.4/docs-read.js b/internot-ai-v0.4/docs-read.js
+index 5094532..fc66f34 100644
+--- a/internot-ai-v0.4/docs-read.js
++++ b/internot-ai-v0.4/docs-read.js
+@@ -146,3 +146,7 @@ async function ocrCanvas(canvas, say) {
+-  ocrWorker ||= await window.Tesseract.createWorker('eng', 1, { workerPath: at('./lib/ocr/worker.min.js'), corePath: at('./lib/ocr/'), langPath: at('./lib/ocr/'), gzip: true, cacheMethod: 'none',
+-    logger: (m) => { if (m.status === 'recognizing text') ocrSay(`Reading the picture… ${Math.round(m.progress * 100)}%`); } });
+-  const { data } = await ocrWorker.recognize(canvas);
++  // The language file is stored unpacked: Android app packaging renames files ending in .gz.
++  let fail; const failed = new Promise((_, no) => { fail = no; });
++  const guard = (p, ms, why) => Promise.race([p, failed, new Promise((_, no) => setTimeout(() => no(new Error(why)), ms))]);
++  ocrWorker ||= await guard(window.Tesseract.createWorker('eng', 1, { workerPath: at('./lib/ocr/worker.min.js'), corePath: at('./lib/ocr/'), langPath: at('./lib/ocr/'), gzip: false, cacheMethod: 'none',
++    errorHandler: (e) => fail(new Error('The part of the app that reads pictures could not start (' + String(e?.message || e).slice(0, 80) + ').')),
++    logger: (m) => { if (m.status === 'recognizing text') ocrSay(`Reading the picture… ${Math.round(m.progress * 100)}%`); } }), 90000, 'Reading pictures took too long on this phone.');
++  let data; try { ({ data } = await guard(ocrWorker.recognize(canvas), 180000, 'Reading this picture took too long.')); } catch (e) { try { ocrWorker?.terminate(); } catch {} ocrWorker = null; throw e; }
