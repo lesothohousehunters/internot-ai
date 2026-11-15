@@ -1,0 +1,1353 @@
+diff --git a/android/BrainPlugin.java b/android/BrainPlugin.java
+new file mode 100644
+index 0000000..f2ce4a0
+--- /dev/null
++++ b/android/BrainPlugin.java
+@@ -0,0 +1,278 @@
++package org.internot.app;
++
++import android.app.Activity;
++import android.content.Intent;
++import android.content.res.AssetFileDescriptor;
++import android.database.Cursor;
++import android.net.Uri;
++import android.provider.OpenableColumns;
++import androidx.activity.result.ActivityResult;
++import com.getcapacitor.JSArray;
++import com.getcapacitor.JSObject;
++import com.getcapacitor.Plugin;
++import com.getcapacitor.PluginCall;
++import com.getcapacitor.PluginMethod;
++import com.getcapacitor.annotation.ActivityCallback;
++import com.getcapacitor.annotation.CapacitorPlugin;
++import java.io.File;
++import java.io.FileOutputStream;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.io.RandomAccessFile;
++import java.nio.charset.StandardCharsets;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import org.json.JSONArray;
++import org.json.JSONObject;
++
++/**
++ * The Brain, run natively with llama.cpp on the phone's processor cores.
++ * Several times faster than the web engine, which can only use one core inside an app.
++ */
++@CapacitorPlugin(name = "Brain")
++public class BrainPlugin extends Plugin {
++
++    private static boolean libOk = false;
++    private static String libError = "";
++
++    static {
++        try {
++            System.loadLibrary("internotbrain");
++            libOk = true;
++        } catch (Throwable t) {
++            libError = String.valueOf(t.getMessage());
++        }
++    }
++
++    static native String nativeLoad(String path, int threads, int ctx);
++    static native String nativeGenerate(String[] roles, String[] contents, int maxTokens, float temp, Sink sink);
++    static native void nativeStop();
++    static native void nativeFree();
++
++    public interface Sink {
++        boolean piece(byte[] utf8);
++    }
++
++    private final ExecutorService worker = Executors.newSingleThreadExecutor();
++    private final ExecutorService io = Executors.newSingleThreadExecutor();
++    private volatile boolean loaded = false;
++    private volatile String loadedPath = "";
++
++    private File modelFile() { return new File(getContext().getFilesDir(), "model.gguf"); }
++    private File metaFile() { return new File(getContext().getFilesDir(), "model.json"); }
++
++    static int threads() {
++        int cores = Runtime.getRuntime().availableProcessors();
++        if (cores >= 6) return 4;
++        if (cores >= 4) return cores - 1;
++        return Math.max(1, cores - 1);
++    }
++
++    private JSObject meta() {
++        try {
++            File f = metaFile();
++            if (!f.exists() || !modelFile().exists()) return null;
++            byte[] b = new byte[(int) f.length()];
++            try (RandomAccessFile r = new RandomAccessFile(f, "r")) { r.readFully(b); }
++            JSObject o = new JSObject(new String(b, StandardCharsets.UTF_8));
++            o.put("size", modelFile().length());
++            return o;
++        } catch (Exception e) {
++            return null;
++        }
++    }
++
++    private void writeMeta(String name) throws Exception {
++        JSONObject o = new JSONObject();
++        o.put("name", name);
++        try (FileOutputStream out = new FileOutputStream(metaFile())) { out.write(o.toString().getBytes(StandardCharsets.UTF_8)); }
++    }
++
++    @PluginMethod
++    public void info(PluginCall call) {
++        JSObject r = new JSObject();
++        r.put("available", libOk);
++        r.put("error", libError);
++        r.put("threads", threads());
++        r.put("cores", Runtime.getRuntime().availableProcessors());
++        r.put("loaded", loaded);
++        r.put("model", meta());
++        boolean bundled = false;
++        try (AssetFileDescriptor fd = getContext().getAssets().openFd("public/bundled/model.gguf")) { bundled = fd.getLength() > 0; } catch (Exception ignored) {}
++        r.put("bundled", bundled);
++        call.resolve(r);
++    }
++
++    private void copyIn(InputStream in, long total, String name) throws Exception {
++        File part = new File(getContext().getFilesDir(), "model.gguf.part");
++        byte[] buf = new byte[1 << 20];
++        long done = 0, lastNote = 0;
++        try (OutputStream out = new FileOutputStream(part)) {
++            int n;
++            while ((n = in.read(buf)) > 0) {
++                out.write(buf, 0, n);
++                done += n;
++                if (done - lastNote > (8 << 20)) {
++                    lastNote = done;
++                    JSObject p = new JSObject();
++                    p.put("done", done);
++                    p.put("total", total);
++                    notifyListeners("progress", p);
++                }
++            }
++        }
++        byte[] magic = new byte[4];
++        try (RandomAccessFile r = new RandomAccessFile(part, "r")) { r.readFully(magic); }
++        if (!"GGUF".equals(new String(magic, StandardCharsets.US_ASCII))) {
++            part.delete();
++            throw new Exception("That is not a GGUF model file.");
++        }
++        unloadNow();
++        modelFile().delete();
++        if (!part.renameTo(modelFile())) throw new Exception("Could not save the model.");
++        writeMeta(name);
++    }
++
++    /** First launch of the full app: copy the model that ships inside the app to where it can be read quickly. */
++    @PluginMethod
++    public void prepareBundled(PluginCall call) {
++        io.execute(() -> {
++            try {
++                JSObject m = meta();
++                if (m != null) { call.resolve(m); return; }   // a model is already here: never replace it
++                try (AssetFileDescriptor fd = getContext().getAssets().openFd("public/bundled/model.gguf"); InputStream in = fd.createInputStream()) {
++                    copyIn(in, fd.getLength(), "Qwen2.5 0.5B (built in)");
++                }
++                JSONObject o = new JSONObject();
++                o.put("name", "Qwen2.5 0.5B (built in)");
++                o.put("bundled", true);
++                try (FileOutputStream out = new FileOutputStream(metaFile())) { out.write(o.toString().getBytes(StandardCharsets.UTF_8)); }
++                call.resolve(meta());
++            } catch (Exception e) {
++                call.reject("Setup could not finish: " + e.getMessage());
++            }
++        });
++    }
++
++    @PluginMethod
++    public void pickModel(PluginCall call) {
++        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
++        i.addCategory(Intent.CATEGORY_OPENABLE);
++        i.setType("*/*");
++        startActivityForResult(call, i, "picked");
++    }
++
++    @ActivityCallback
++    private void picked(PluginCall call, ActivityResult result) {
++        if (call == null) return;
++        if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null || result.getData().getData() == null) {
++            call.reject("cancelled");
++            return;
++        }
++        final Uri uri = result.getData().getData();
++        io.execute(() -> {
++            try {
++                String name = "model.gguf";
++                long size = -1;
++                try (Cursor c = getContext().getContentResolver().query(uri, null, null, null, null)) {
++                    if (c != null && c.moveToFirst()) {
++                        int ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME), si = c.getColumnIndex(OpenableColumns.SIZE);
++                        if (ni >= 0) name = c.getString(ni);
++                        if (si >= 0) size = c.getLong(si);
++                    }
++                }
++                try (InputStream in = getContext().getContentResolver().openInputStream(uri)) { copyIn(in, size, name); }
++                call.resolve(meta());
++            } catch (Exception e) {
++                call.reject(e.getMessage());
++            }
++        });
++    }
++
++    @PluginMethod
++    public void deleteModel(PluginCall call) {
++        unloadNow();
++        modelFile().delete();
++        metaFile().delete();
++        call.resolve();
++    }
++
++    private void unloadNow() {
++        if (libOk && loaded) {
++            nativeStop();
++            nativeFree();
++        }
++        loaded = false;
++        loadedPath = "";
++    }
++
++    @PluginMethod
++    public void load(PluginCall call) {
++        if (!libOk) { call.reject("Native engine missing: " + libError); return; }
++        final int ctx = call.getInt("ctx", 2048);
++        worker.execute(() -> {
++            File f = modelFile();
++            if (!f.exists()) { call.reject("NO_MODEL"); return; }
++            if (loaded && loadedPath.equals(f.getAbsolutePath())) { call.resolve(); return; }
++            long t0 = System.currentTimeMillis();
++            String err = nativeLoad(f.getAbsolutePath(), threads(), ctx);
++            if (!err.isEmpty()) { call.reject(err); return; }
++            loaded = true;
++            loadedPath = f.getAbsolutePath();
++            JSObject r = new JSObject();
++            r.put("ms", System.currentTimeMillis() - t0);
++            r.put("threads", threads());
++            call.resolve(r);
++        });
++    }
++
++    @PluginMethod
++    public void unload(PluginCall call) {
++        worker.execute(() -> { unloadNow(); call.resolve(); });
++    }
++
++    @PluginMethod
++    public void stop(PluginCall call) {
++        if (libOk) nativeStop();
++        call.resolve();
++    }
++
++    /** Streams the answer as "piece" events, then resolves with timing figures. */
++    @PluginMethod
++    public void generate(PluginCall call) {
++        if (!libOk) { call.reject("Native engine missing"); return; }
++        final JSArray msgs = call.getArray("messages");
++        final int max = call.getInt("maxTokens", 256);
++        final float temp = call.getFloat("temperature", 0.6f);
++        final String id = call.getString("id", "");
++        worker.execute(() -> {
++            try {
++                if (!loaded) { call.reject("NOT_LOADED"); return; }
++                int n = msgs.length();
++                String[] roles = new String[n], contents = new String[n];
++                for (int i = 0; i < n; i++) {
++                    JSONObject m = msgs.getJSONObject(i);
++                    roles[i] = m.optString("role", "user");
++                    contents[i] = m.optString("content", "");
++                }
++                String res = nativeGenerate(roles, contents, max, temp, utf8 -> {
++                    JSObject p = new JSObject();
++                    p.put("id", id);
++                    p.put("text", new String(utf8, StandardCharsets.UTF_8));
++                    notifyListeners("piece", p);
++                    return true;
++                });
++                if (!res.startsWith("ok:")) { call.reject(res); return; }
++                String[] s = res.substring(3).split(",");
++                JSObject r = new JSObject();
++                r.put("promptTokens", Integer.parseInt(s[0]));
++                r.put("promptMs", Integer.parseInt(s[1]));
++                r.put("tokens", Integer.parseInt(s[2]));
++                r.put("genMs", Integer.parseInt(s[3]));
++                call.resolve(r);
++            } catch (Exception e) {
++                call.reject(String.valueOf(e.getMessage()));
++            }
++        });
++    }
++}
+diff --git a/android/MainActivity.java b/android/MainActivity.java
+index f00a1a0..5fe9284 100644
+--- a/android/MainActivity.java
++++ b/android/MainActivity.java
+@@ -9,0 +10 @@ public class MainActivity extends BridgeActivity {
++        registerPlugin(BrainPlugin.class);
+diff --git a/android/brain/CMakeLists.txt b/android/brain/CMakeLists.txt
+new file mode 100644
+index 0000000..7ffab7e
+--- /dev/null
++++ b/android/brain/CMakeLists.txt
+@@ -0,0 +1,23 @@
++cmake_minimum_required(VERSION 3.22.1)
++project(internotbrain CXX C)
++set(CMAKE_CXX_STANDARD 17)
++set(LLAMA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp CACHE PATH "llama.cpp source")
++set(LLAMA_BUILD_COMMON OFF CACHE BOOL "" FORCE)
++set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
++set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
++set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
++set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
++set(LLAMA_BUILD_MTMD OFF CACHE BOOL "" FORCE)
++set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
++set(GGML_NATIVE OFF CACHE BOOL "" FORCE)        # must run on every phone, not just the build machine
++set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
++set(GGML_LLAMAFILE ON CACHE BOOL "" FORCE)
++add_subdirectory(${LLAMA_DIR} llama)
++if (ANDROID)
++  add_library(internotbrain SHARED brain.cpp jni.cpp)
++  target_link_libraries(internotbrain llama log)
++  target_link_options(internotbrain PRIVATE "-Wl,-z,max-page-size=16384")
++else()
++  add_executable(braintest brain.cpp test_main.cpp)
++  target_link_libraries(braintest llama)
++endif()
+diff --git a/android/brain/brain.cpp b/android/brain/brain.cpp
+new file mode 100644
+index 0000000..2e63693
+--- /dev/null
++++ b/android/brain/brain.cpp
+@@ -0,0 +1,137 @@
++// Internot AI: the on-device language model, run natively with llama.cpp.
++// One model, one conversation at a time. The part of the prompt that did not change since the
++// last answer stays in memory, so follow-up questions start answering quickly.
++#include "brain.h"
++#include "llama.h"
++#include <atomic>
++#include <chrono>
++#include <mutex>
++
++static llama_model * g_model = nullptr;
++static llama_context * g_ctx = nullptr;
++static std::vector<llama_token> g_past;      // tokens currently held in the context
++static std::atomic<bool> g_stop{false};
++static std::mutex g_mu;
++static bool g_backend = false;
++
++static double now_ms() { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
++
++void brain_free() {
++    std::lock_guard<std::mutex> lock(g_mu);
++    if (g_ctx) { llama_free(g_ctx); g_ctx = nullptr; }
++    if (g_model) { llama_model_free(g_model); g_model = nullptr; }
++    g_past.clear();
++}
++bool brain_loaded() { return g_ctx != nullptr; }
++void brain_stop() { g_stop = true; }
++
++std::string brain_load(const std::string & path, int n_threads, int n_ctx) {
++    brain_free();
++    std::lock_guard<std::mutex> lock(g_mu);
++    if (!g_backend) { llama_backend_init(); g_backend = true; }
++    llama_model_params mp = llama_model_default_params();
++    mp.n_gpu_layers = 0;
++    g_model = llama_model_load_from_file(path.c_str(), mp);
++    if (!g_model) return "The model file could not be opened.";
++    llama_context_params cp = llama_context_default_params();
++    cp.n_ctx = n_ctx;
++    cp.n_batch = 256;
++    cp.n_ubatch = 256;
++    cp.n_threads = n_threads;
++    cp.n_threads_batch = n_threads;
++    g_ctx = llama_init_from_model(g_model, cp);
++    if (!g_ctx) { llama_model_free(g_model); g_model = nullptr; return "Not enough memory to start the model."; }
++    return "";
++}
++
++static std::string apply_template(const std::vector<BrainMsg> & msgs) {
++    std::vector<llama_chat_message> chat;
++    for (const auto & m : msgs) chat.push_back({ m.role.c_str(), m.content.c_str() });
++    const char * tmpl = llama_model_chat_template(g_model, nullptr);
++    std::vector<char> buf(4096);
++    for (const auto & m : msgs) buf.resize(buf.size() + m.content.size() * 2);
++    int n = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, buf.data(), (int) buf.size());
++    if (n > (int) buf.size()) { buf.resize(n + 1); n = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, buf.data(), (int) buf.size()); }
++    if (n < 0) {   // unknown template: fall back to ChatML, which most small models understand
++        std::string s;
++        for (const auto & m : msgs) s += "<|im_start|>" + m.role + "\n" + m.content + "<|im_end|>\n";
++        return s + "<|im_start|>assistant\n";
++    }
++    return std::string(buf.data(), n);
++}
++
++// Holds back bytes that end in the middle of a UTF-8 character, so every piece sent is valid text.
++static size_t complete_utf8(const std::string & s) {
++    size_t n = s.size(), i = n;
++    for (int back = 0; back < 4 && i > 0; back++) {
++        unsigned char c = s[i - 1];
++        if ((c & 0xC0) == 0x80) { i--; continue; }   // continuation byte
++        int need = (c & 0x80) == 0 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
++        return (n - (i - 1) >= (size_t) need) ? n : i - 1;
++    }
++    return n;
++}
++
++std::string brain_generate(const std::vector<BrainMsg> & msgs, int max_tokens, float temp,
++                           const std::function<bool(const std::string &)> & on_piece, std::string & stats) {
++    std::lock_guard<std::mutex> lock(g_mu);
++    if (!g_ctx) return "The model is not loaded.";
++    g_stop = false;
++    const llama_vocab * vocab = llama_model_get_vocab(g_model);
++    const std::string prompt = apply_template(msgs);
++    int n = -llama_tokenize(vocab, prompt.c_str(), (int) prompt.size(), nullptr, 0, true, true);
++    std::vector<llama_token> toks(n);
++    if (llama_tokenize(vocab, prompt.c_str(), (int) prompt.size(), toks.data(), n, true, true) < 0) return "The question could not be read.";
++    const int n_ctx = (int) llama_n_ctx(g_ctx);
++    if ((int) toks.size() + max_tokens + 8 > n_ctx) {   // keep the newest part of a very long prompt
++        int keep = n_ctx - max_tokens - 8; if (keep < 64) return "The question is too long.";
++        toks.erase(toks.begin(), toks.end() - keep);
++    }
++
++    // Reuse what is already in memory: only the new part of the conversation is processed.
++    size_t common = 0;
++    while (common < g_past.size() && common < toks.size() && g_past[common] == toks[common]) common++;
++    if (common == toks.size()) common--;   // the last prompt token must be processed to get an answer
++    llama_memory_t mem = llama_get_memory(g_ctx);
++    if (!llama_memory_seq_rm(mem, 0, (llama_pos) common, -1)) { llama_memory_clear(mem, true); common = 0; }
++    g_past.resize(common);
++
++    const double t0 = now_ms();
++    const int n_batch = (int) llama_n_batch(g_ctx);
++    for (size_t i = common; i < toks.size(); i += n_batch) {
++        int len = (int) std::min<size_t>(n_batch, toks.size() - i);
++        if (llama_decode(g_ctx, llama_batch_get_one(toks.data() + i, len)) != 0) { llama_memory_clear(mem, true); g_past.clear(); return "The model ran out of memory."; }
++        g_past.insert(g_past.end(), toks.begin() + i, toks.begin() + i + len);
++        if (g_stop) return "";
++    }
++    const double t1 = now_ms();
++
++    llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
++    llama_sampler_chain_add(smpl, llama_sampler_init_penalties(llama_vocab_n_tokens(vocab), 64, 1.1f, 0.0f, 0.0f));
++    if (temp <= 0.01f) llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
++    else {
++        llama_sampler_chain_add(smpl, llama_sampler_init_top_k(40));
++        llama_sampler_chain_add(smpl, llama_sampler_init_top_p(0.9f, 1));
++        llama_sampler_chain_add(smpl, llama_sampler_init_temp(temp));
++        llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
++    }
++    std::string pending; int made = 0; std::string err;
++    for (; made < max_tokens && !g_stop; made++) {
++        llama_token t = llama_sampler_sample(smpl, g_ctx, -1);
++        if (llama_vocab_is_eog(vocab, t)) break;
++        char piece[256];
++        int len = llama_token_to_piece(vocab, t, piece, sizeof piece, 0, false);
++        if (len > 0) pending.append(piece, len);
++        size_t ok = complete_utf8(pending);
++        if (ok > 0) { if (!on_piece(pending.substr(0, ok))) g_stop = true; pending.erase(0, ok); }
++        if ((int) g_past.size() + 1 >= n_ctx) break;
++        llama_token one = t;
++        if (llama_decode(g_ctx, llama_batch_get_one(&one, 1)) != 0) { err = "The model ran out of memory."; break; }
++        g_past.push_back(t);
++    }
++    if (!pending.empty() && err.empty()) on_piece(pending);
++    llama_sampler_free(smpl);
++    const double t2 = now_ms();
++    stats = std::to_string(toks.size() - common) + "," + std::to_string((int) (t1 - t0)) + "," + std::to_string(made) + "," + std::to_string((int) (t2 - t1));
++    return err;
++}
+diff --git a/android/brain/brain.h b/android/brain/brain.h
+new file mode 100644
+index 0000000..8112657
+--- /dev/null
++++ b/android/brain/brain.h
+@@ -0,0 +1,17 @@
++// Internot AI: the on-device language model, run natively with llama.cpp.
++#pragma once
++#include <functional>
++#include <string>
++#include <vector>
++
++struct BrainMsg { std::string role, content; };
++
++// Returns an empty string on success, otherwise a reason.
++std::string brain_load(const std::string & path, int n_threads, int n_ctx);
++// Streams each piece of text to on_piece; stop early by returning false from on_piece.
++// Returns an empty string on success, otherwise a reason. stats gets "prompt_tokens,prompt_ms,gen_tokens,gen_ms".
++std::string brain_generate(const std::vector<BrainMsg> & msgs, int max_tokens, float temp,
++                           const std::function<bool(const std::string &)> & on_piece, std::string & stats);
++void brain_stop();
++void brain_free();
++bool brain_loaded();
+diff --git a/android/brain/jni.cpp b/android/brain/jni.cpp
+new file mode 100644
+index 0000000..770c876
+--- /dev/null
++++ b/android/brain/jni.cpp
+@@ -0,0 +1,43 @@
++// Bridge between the Java plugin and the native model.
++#include <jni.h>
++#include <string>
++#include <vector>
++#include "brain.h"
++
++static std::string jstr(JNIEnv * env, jstring s) {
++    if (!s) return "";
++    const char * c = env->GetStringUTFChars(s, nullptr); std::string r(c); env->ReleaseStringUTFChars(s, c); return r;
++}
++// Java's modified UTF-8 cannot carry 4-byte characters (emoji), so text goes back as raw bytes.
++static jbyteArray jbytes(JNIEnv * env, const std::string & s) {
++    jbyteArray a = env->NewByteArray((jsize) s.size()); env->SetByteArrayRegion(a, 0, (jsize) s.size(), (const jbyte *) s.data()); return a;
++}
++
++extern "C" JNIEXPORT jstring JNICALL
++Java_org_internot_app_BrainPlugin_nativeLoad(JNIEnv * env, jclass, jstring path, jint threads, jint ctx) {
++    return env->NewStringUTF(brain_load(jstr(env, path), threads, ctx).c_str());
++}
++
++extern "C" JNIEXPORT jstring JNICALL
++Java_org_internot_app_BrainPlugin_nativeGenerate(JNIEnv * env, jclass, jobjectArray roles, jobjectArray contents,
++                                                  jint max_tokens, jfloat temp, jobject sink) {
++    std::vector<BrainMsg> msgs;
++    jsize n = env->GetArrayLength(roles);
++    for (jsize i = 0; i < n; i++) {
++        jstring r = (jstring) env->GetObjectArrayElement(roles, i), c = (jstring) env->GetObjectArrayElement(contents, i);
++        msgs.push_back({ jstr(env, r), jstr(env, c) });
++        env->DeleteLocalRef(r); env->DeleteLocalRef(c);
++    }
++    jclass cls = env->GetObjectClass(sink);
++    jmethodID piece = env->GetMethodID(cls, "piece", "([B)Z");
++    std::string stats;
++    std::string err = brain_generate(msgs, max_tokens, temp, [&](const std::string & p) {
++        jbyteArray b = jbytes(env, p); jboolean go = env->CallBooleanMethod(sink, piece, b); env->DeleteLocalRef(b);
++        if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
++        return (bool) go;
++    }, stats);
++    return env->NewStringUTF(err.empty() ? ("ok:" + stats).c_str() : err.c_str());
++}
++
++extern "C" JNIEXPORT void JNICALL Java_org_internot_app_BrainPlugin_nativeStop(JNIEnv *, jclass) { brain_stop(); }
++extern "C" JNIEXPORT void JNICALL Java_org_internot_app_BrainPlugin_nativeFree(JNIEnv *, jclass) { brain_free(); }
+diff --git a/android/brain/test_main.cpp b/android/brain/test_main.cpp
+new file mode 100644
+index 0000000..1ce3b80
+--- /dev/null
++++ b/android/brain/test_main.cpp
+@@ -0,0 +1,13 @@
++#include "brain.h"
++#include <cstdio>
++int main(int argc, char ** argv) {
++    std::string e = brain_load(argv[1], 2, 1024); if (!e.empty()) { printf("LOAD FAIL %s\n", e.c_str()); return 1; }
++    std::vector<BrainMsg> m = { {"system", "You are helpful."}, {"user", "Hello there"} };
++    std::string stats, out;
++    e = brain_generate(m, 40, 0.6f, [&](const std::string & p) { out += p; return true; }, stats);
++    printf("1: err=[%s] stats=%s len=%zu\n", e.c_str(), stats.c_str(), out.size());
++    m.push_back({"assistant", out}); m.push_back({"user", "And again?"}); std::string out2;
++    e = brain_generate(m, 40, 0.0f, [&](const std::string & p) { out2 += p; return out2.size() < 30; }, stats);
++    printf("2: err=[%s] stats=%s len=%zu (prompt tokens should be small: reuse)\n", e.c_str(), stats.c_str(), out2.size());
++    brain_free(); return 0;
++}
+diff --git a/android/bundled.js b/android/bundled.js
+index 33dc85e..af7e6ec 100644
+--- a/android/bundled.js
++++ b/android/bundled.js
+@@ -3,0 +4,15 @@ window.internotSetup = (async () => {
++  // Native engine: the model is copied once from inside the app to the app's own storage.
++  const brain = window.Capacitor && window.capacitorExports?.registerPlugin?.('Brain');
++  if (brain) {
++    try {
++      const info = await brain.info();
++      if (info.available && info.bundled) {
++        if (info.model || localStorage.getItem('bundledNative')) return;
++        const text = document.getElementById('boot-text'), bar = document.getElementById('boot-bar'); document.getElementById('boot-progress').hidden = false;
++        text.textContent = 'Getting the AI model ready. One time only, no internet used.';
++        const h = await brain.addListener('progress', (p) => { if (p.total > 0) bar.style.width = Math.min(100, p.done / p.total * 100) + '%'; });
++        try { await brain.prepareBundled(); localStorage.setItem('bundledNative', '1'); } finally { h.remove?.(); document.getElementById('boot-progress').hidden = true; }
++        return;
++      }
++    } catch (e) { console.warn('native setup failed, using the web engine', e); }
++  }
+diff --git a/android/emulator-test.sh b/android/emulator-test.sh
+index d0cffcc..9371f06 100644
+--- a/android/emulator-test.sh
++++ b/android/emulator-test.sh
+@@ -11 +11 @@ seen=0
+-for i in $(seq 1 480); do
++for i in $(seq 1 660); do
+diff --git a/android/fetch-libs.sh b/android/fetch-libs.sh
+new file mode 100644
+index 0000000..48c734e
+--- /dev/null
++++ b/android/fetch-libs.sh
+@@ -0,0 +1,12 @@
++#!/bin/bash
++# Fetches the libraries that read PDFs and the text in pictures into the app folder. The build runs this once.
++set -e
++A=$(cd "$1" && pwd); T=$(mktemp -d); cd "$T"
++npm pack pdfjs-dist@3.11.174 tesseract.js@5.1.1 tesseract.js-core@5.1.1 @tesseract.js-data/eng@1.0.0 > /dev/null
++for f in *.tgz; do mkdir -p "x/${f%.tgz}"; tar xzf "$f" -C "x/${f%.tgz}"; done
++mkdir -p "$A/lib/pdfjs" "$A/lib/ocr"
++cp x/pdfjs*/package/legacy/build/pdf.min.js x/pdfjs*/package/legacy/build/pdf.worker.min.js "$A/lib/pdfjs/"
++cp x/tesseract.js-5*/package/dist/tesseract.min.js x/tesseract.js-5*/package/dist/worker.min.js "$A/lib/ocr/"
++cp x/tesseract.js-core*/package/tesseract-core-lstm.wasm.js x/tesseract.js-core*/package/tesseract-core-simd-lstm.wasm.js "$A/lib/ocr/"
++cp x/tesseract.js-data*/package/4.0.0_best_int/eng.traineddata.gz "$A/lib/ocr/"
++ls -la "$A/lib/pdfjs" "$A/lib/ocr"
+diff --git a/android/make-testdocs.sh b/android/make-testdocs.sh
+new file mode 100755
+index 0000000..dcca884
+--- /dev/null
++++ b/android/make-testdocs.sh
+@@ -0,0 +1,26 @@
++#!/bin/bash
++# Makes the sample documents the emulator test adds to Docs: one of every kind people send.
++set -e
++D=${1:-testdocs}; mkdir -p "$D"; cd "$D"
++cat > src.html <<'H'
++<html><body><h1>Clinic schedule</h1><p>The Roma clinic opens at 8 o'clock on Mondays &amp; Thursdays.</p><table><tr><td>Nurse</td><td>Mpho Lerotholi</td></tr><tr><td>Phone</td><td>5885 1234</td></tr></table><p>Bring your Bukana health booklet.</p></body></html>
++H
++printf 'Item,Price\nMaize meal 10kg,95\nParaffin 1L,22\n' > prices.csv
++which soffice >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends libreoffice-writer-nogui libreoffice-calc-nogui > /dev/null; }
++soffice --headless --convert-to odt --outdir . src.html > /dev/null 2>&1 || true
++for f in docx doc rtf pdf; do soffice --headless --convert-to $f --outdir . src.odt > /dev/null 2>&1 || true; done
++soffice --headless --convert-to xlsx --outdir . prices.csv > /dev/null 2>&1 || true
++pip install --quiet python-pptx pillow 2>/dev/null || pip install --quiet --break-system-packages python-pptx pillow
++python3 - <<'P'
++from pptx import Presentation
++from PIL import Image, ImageDraw, ImageFont
++p = Presentation(); s = p.slides.add_slide(p.slide_layouts[1]); s.shapes.title.text = 'Water safety'
++s.placeholders[1].text = 'Boil river water for one minute before drinking.'; p.save('talk.pptx')
++im = Image.new('RGB', (1200, 500), 'white'); d = ImageDraw.Draw(im)
++try: f = ImageFont.truetype('DejaVuSans.ttf', 52)
++except Exception: f = ImageFont.load_default()
++for i, t in enumerate(['NOTICE: Village meeting', "Saturday 9 am at the chief's place.", 'Bring your ID book.']): d.text((60, 60 + i * 120), t, fill='black', font=f)
++im.save('notice.jpg', quality=88)
++P
++ls | grep -v list.json | python3 -c "import sys,json;print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))" > list.json
++ls -la; cat list.json
+diff --git a/android/selftest.js b/android/selftest.js
+index abb38a3..500dada 100644
+--- a/android/selftest.js
++++ b/android/selftest.js
+@@ -9,0 +10,2 @@
++    const brainPlugin = window.capacitorExports?.registerPlugin?.('Brain');
++    try { log('brain-info', await brainPlugin.info()); } catch (e) { log('brain-info', { error: String(e && e.message || e) }); }
+@@ -22,0 +25,4 @@
++    log('engine', { native: !!internot.native, loadInfo: internot.loadInfo || null, stats: internot.lastStats || null });
++    { const t2 = performance.now(); let f2 = null; document.getElementById('input').value = 'Name one mountain there.'; document.getElementById('composer').requestSubmit();
++      for (let i = 0; i < 700; i++) { await wait(300); const m = internot.messages.at(-1); if (f2 == null && m && m.role === 'assistant' && m.content) f2 = performance.now() - t2; if (!internot.generating && i > 2) break; }
++      log('chat2', { firstWordMs: f2 == null ? null : Math.round(f2), totalMs: Math.round(performance.now() - t2), answer: (internot.messages.at(-1)?.content || '').slice(0, 300), stats: internot.lastStats || null }); }
+@@ -28,0 +35,11 @@
++    // satellite pictures, Maseru close up
++    if (find('maseru')) { internotMap.route = null; internotMap.view.cx = a.x; internotMap.view.cy = a.y; internotMap.view.z = 13; internotMap.api.setSat(true); await wait(4000); }
++    log('sat', { local: internotMap.api.SAT.local, tiles: [...internotMap.api.SAT.tiles.values()].filter((t) => t.img).length });
++    await shot('map-satellite');
++    internotMap.api.setSat(false);
++    // a location pasted from WhatsApp
++    const box = document.getElementById('map-search'); box.value = 'https://maps.google.com/maps?q=-29.31678%2C27.48226&z=17&hl=en'; box.dispatchEvent(new Event('input'));
++    await wait(400); document.querySelector('#map-results li')?.click(); await wait(1500);
++    log('paste', { parsed: internotMap.api.parseLocation(box.value), sheet: document.getElementById('map-sheet').textContent.slice(0, 120) });
++    await shot('map-pasted');
++    document.querySelector('#map-sheet button:last-child')?.click();
+@@ -33,0 +51,10 @@
++    // documents of every kind, added the way a person would
++    tab('docs'); await wait(500);
++    try {
++      const names = await (await fetch('./testdocs/list.json')).json(); const dt = new DataTransfer();
++      for (const n of names) { const b = await (await fetch('./testdocs/' + n)).blob(); dt.items.add(new File([b], n, { type: b.type })); }
++      const input = document.getElementById('doc-file'); input.files = dt.files; const td = performance.now(); input.dispatchEvent(new Event('change'));
++      for (let i = 0; i < 400; i++) { await wait(500); const st = document.getElementById('doc-status').textContent; if ((st.match(/: /g) || []).length >= names.length && !/Reading/.test(st)) break; }
++      log('docs', { ms: Math.round(performance.now() - td), status: document.getElementById('doc-status').textContent, docs: internot.docs.map((d) => [d.title + '.' + d.kind, d.chars, !!d.thumb, d.chunks[0].slice(0, 50)]) });
++    } catch (e) { log('docs', { error: String(e && e.stack || e) }); }
++    await shot('docs');
+diff --git a/internot-ai-v0.4/app.js b/internot-ai-v0.4/app.js
+index 3e77d51..273f46c 100644
+--- a/internot-ai-v0.4/app.js
++++ b/internot-ai-v0.4/app.js
+@@ -13,0 +14,2 @@ const NATIVE = !!window.Capacitor;   // running inside the installed Android app
++// Android app: the native engine uses all the fast processor cores. The web engine is the fallback.
++const BRAIN = NATIVE ? window.capacitorExports?.registerPlugin?.('Brain') : null;
+@@ -148,0 +151,6 @@ async function ensureLoaded() {
++    if (state.native) {
++      if (!state.modelMeta) throw new Error('NO_MODEL');
++      setStatus('Waking The Brain…', 'busy');
++      const r = await BRAIN.load({ ctx: 2048 }); state.loadInfo = r; state.loaded = true;
++      setStatus('Ready · offline', 'ok'); renderModel(); return;
++    }
+@@ -166,0 +175 @@ async function unloadModel() {
++  if (state.native) { if (state.loaded) { try { await BRAIN.unload(); } catch {} } state.loaded = false; setStatus(state.modelMeta ? 'Asleep · memory freed' : 'No model yet'); renderModel(); return; }
+@@ -204 +213 @@ function retrieve(query, k = 3) {
+-async function addDoc(title, text) {
++async function addDoc(title, text, extra = {}) {
+@@ -206 +215 @@ async function addDoc(title, text) {
+-  state.docs.push({ id: Date.now() + Math.random().toString(36).slice(2), title: title.trim() || 'Untitled', chars: text.length, chunks: chunkText(text) });
++  state.docs.push({ id: Date.now() + Math.random().toString(36).slice(2), title: title.trim() || 'Untitled', chars: text.length, chunks: chunkText(text), ...extra });
+@@ -237 +246,9 @@ async function send(question) {
+-    for (;;) {
++    if (state.native) {   // one call; the answer streams in piece by piece
++      setStatus('Thinking…', 'busy'); const id = Math.random().toString(36).slice(2);
++      state.onPiece = (p) => { if (p.id !== id) return; reply.content += p.text; think.remove(); bubble.firstChild.textContent = reply.content; scrollDown(); };
++      state.abort.signal.addEventListener('abort', () => BRAIN.stop().catch(() => {}));
++      try { state.lastStats = await BRAIN.generate({ messages: msgs, maxTokens: maxTotal, temperature: state.settings.temp, id }); }
++      finally { state.onPiece = null; }
++      if (state.abort.signal.aborted) throw Object.assign(new Error('stopped'), { name: 'AbortError' });
++    }
++    else for (;;) {
+@@ -302,2 +319,4 @@ function renderDocs() {
+-    const li = document.createElement('li'); const info = document.createElement('div');
+-    info.textContent = d.title; const sm = document.createElement('small');
++    const li = document.createElement('li'); const info = document.createElement('div'); info.className = 'doc-info';
++    if (d.thumb) { const im = document.createElement('img'); im.className = 'doc-thumb'; im.src = d.thumb; im.alt = ''; li.append(im); }
++    else { const ic = document.createElement('span'); ic.className = 'doc-kind'; ic.textContent = (d.kind || 'text').slice(0, 4).toUpperCase(); li.append(ic); }
++    info.append(document.createTextNode(d.title)); const sm = document.createElement('small');
+@@ -304,0 +324,2 @@ function renderDocs() {
++    const peek = document.createElement('details'); const su = document.createElement('summary'); su.textContent = 'Show text'; const pre = document.createElement('p'); pre.className = 'doc-peek';
++    peek.ontoggle = () => { if (peek.open && !pre.textContent) pre.textContent = d.chunks.slice(0, 4).join('\n…\n').slice(0, 2400); }; peek.append(su, pre); info.append(peek);
+@@ -323 +344 @@ function renderDevice() {
+-    ['Fast mode (multi-thread)', self.crossOriginIsolated ? 'on' : NATIVE ? 'not available in this Android build' : 'off — reopen the app once to switch on'],
++    state.native ? ['AI engine', `native, ${state.native.threads} of ${state.native.cores} cores`] : ['AI engine', self.crossOriginIsolated ? 'web, several cores' : NATIVE ? 'web, one core (slower)' : 'web, one core — reopen the app once for more'],
+@@ -356,0 +378,6 @@ function wire() {
++  $('model-file').parentElement.addEventListener('click', async (e) => {   // native engine: the phone's own file picker copies the model in
++    if (!state.native) return; e.preventDefault();
++    try { setStatus('Copying model…', 'busy'); loader('Copying the model. This takes a minute.'); const m = await BRAIN.pickModel(); await unloadModel(); state.modelMeta = m; setStatus('Model saved', 'ok'); }
++    catch (err) { setStatus(err?.message === 'cancelled' ? 'Ready' : (err?.message || 'Could not copy the model'), err?.message === 'cancelled' ? '' : 'err'); }
++    loader(null); renderModel();
++  });
+@@ -362 +389 @@ function wire() {
+-    await unloadModel(); try { await rootDir?.removeEntry(MODEL_FILE); await rootDir?.removeEntry('model.json'); } catch {}
++    await unloadModel(); if (state.native) { try { await BRAIN.deleteModel(); } catch {} } try { await rootDir?.removeEntry(MODEL_FILE); await rootDir?.removeEntry('model.json'); } catch {}
+@@ -367 +394,9 @@ function wire() {
+-  $('doc-file').onchange = async (e) => { for (const f of e.target.files) await addDoc(f.name.replace(/\.[^.]+$/, ''), await f.text()); e.target.value = ''; };
++  $('doc-file').onchange = async (e) => {
++    const { readDoc, thumbOf } = await import('./docs-read.js'); const st = $('doc-status'); const notes = [];
++    for (const f of e.target.files) {
++      try { st.textContent = `Reading ${f.name}…`; const text = (await readDoc(f, (t) => { st.textContent = `${f.name}: ${t}`; })).slice(0, 600000);
++        if (text.replace(/\s/g, '').length < 12) notes.push(`${f.name}: no readable text was found.`); else { await addDoc(f.name.replace(/\.[^.]+$/, ''), text, { thumb: await thumbOf(f), kind: (f.name.match(/\.([a-z0-9]{1,5})$/i) || [, 'text'])[1].toLowerCase() }); notes.push(`${f.name}: added.`); } }
++      catch (err) { console.warn('document unreadable', err); notes.push(`${f.name}: ${err?.message || 'could not be read'}`); }
++    }
++    st.textContent = notes.join(' '); e.target.value = '';
++  };
+@@ -396,2 +431,3 @@ async function registerSW() {
+-  const stored = await getStoredModel();
+-  if (stored) state.modelMeta = (await readJSON('model.json', null)) || { name: MODEL_FILE, size: stored.size };
++  if (BRAIN) { try { const i = await BRAIN.info(); if (i.available) { state.native = i; state.modelMeta = i.model || null; BRAIN.addListener('progress', (p) => loader('Copying the model…', p.total > 0 ? p.done / p.total : undefined)); BRAIN.addListener('piece', (p) => state.onPiece?.(p)); } } catch (e) { console.warn('native engine unavailable', e); } }
++  if (!state.native) { const stored = await getStoredModel(); if (stored) state.modelMeta = (await readJSON('model.json', null)) || { name: MODEL_FILE, size: stored.size }; }
++  else { $('model-download').closest('details').hidden = true; try { await rootDir?.removeEntry(MODEL_FILE); } catch {} }   // a web-engine copy is no longer needed
+diff --git a/internot-ai-v0.4/docs-read.js b/internot-ai-v0.4/docs-read.js
+new file mode 100644
+index 0000000..5094532
+--- /dev/null
++++ b/internot-ai-v0.4/docs-read.js
+@@ -0,0 +1,188 @@
++// Internot AI — reads the text out of almost any file, on the device, with no internet.
++// Text files, web pages, Word / PowerPoint / Excel / OpenDocument / EPUB, RTF, PDF, and photos (the text in them).
++const at = (p) => new URL(p, location.href).href;
++const scripts = new Map();
++const loadScript = (src) => scripts.get(src) || scripts.set(src, new Promise((ok, bad) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = () => { scripts.delete(src); bad(new Error('A part of the app needed for this kind of file is missing.')); }; document.head.append(s); })).get(src);
++const tidy = (t) => t.replace(/\r/g, '').replace(/[ \t ]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
++const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
++const unent = (s) => s.replace(/&(#x[0-9a-f]+|#\d+|\w+);/gi, (m, e) => e[0] === '#' ? String.fromCodePoint(e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : +e.slice(1)) : ENT[e.toLowerCase()] ?? m);
++const xmlText = (xml, breaks, tabs) => unent(xml.replace(breaks, '\n').replace(tabs || /$^/, '\t').replace(/<[^>]+>/g, ''));
++const html = (s) => tidy(unent(s.replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, ' ').replace(/<(br|\/p|\/div|\/li|\/tr|\/h\d|\/title)\b[^>]*>/gi, '\n').replace(/<\/t[dh]>/gi, '\t').replace(/<[^>]+>/g, '')));
++
++/* ---------- zip (Word, Excel, PowerPoint, OpenDocument and EPUB files are zip folders) ---------- */
++async function unzip(buf) {
++  const v = new DataView(buf), u8 = new Uint8Array(buf); let e = buf.byteLength - 22;
++  while (e >= 0 && v.getUint32(e, true) !== 0x06054b50) e--;
++  if (e < 0) throw new Error('not a zip');
++  const files = new Map(); let p = v.getUint32(e + 16, true); const n = v.getUint16(e + 10, true); const dec = new TextDecoder();
++  for (let i = 0; i < n && v.getUint32(p, true) === 0x02014b50; i++) {
++    const method = v.getUint16(p + 10, true), size = v.getUint32(p + 20, true), nl = v.getUint16(p + 28, true), xl = v.getUint16(p + 30, true), cl = v.getUint16(p + 32, true), off = v.getUint32(p + 42, true);
++    files.set(dec.decode(u8.subarray(p + 46, p + 46 + nl)), { method, size, off }); p += 46 + nl + xl + cl;
++  }
++  const read = async (name) => {
++    const f = files.get(name); if (!f) return '';
++    const start = f.off + 30 + v.getUint16(f.off + 26, true) + v.getUint16(f.off + 28, true); const raw = u8.subarray(start, start + f.size);
++    if (f.method === 0) return dec.decode(raw);
++    if (f.method !== 8) return '';
++    return new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).text();
++  };
++  return { names: [...files.keys()], read };
++}
++const byNumber = (a, b) => (+(a.match(/(\d+)\D*$/) || [0, 0])[1]) - (+(b.match(/(\d+)\D*$/) || [0, 0])[1]);
++async function office(buf) {
++  const z = await unzip(buf); const has = (n) => z.names.includes(n); const out = [];
++  if (has('word/document.xml')) return tidy(xmlText(await z.read('word/document.xml'), /<\/w:p>|<w:br\b[^>]*>/g, /<w:tab\b[^>]*>/g));
++  const slides = z.names.filter((n) => /^ppt\/slides\/slide\d+\.xml$/.test(n)).sort(byNumber);
++  if (slides.length) { for (const [i, n] of slides.entries()) out.push(`Slide ${i + 1}\n` + xmlText(await z.read(n), /<\/a:p>/g)); return tidy(out.join('\n\n')); }
++  const sheets = z.names.filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort(byNumber);
++  if (sheets.length) {
++    const shared = [...(await z.read('xl/sharedStrings.xml')).matchAll(/<si>([\s\S]*?)<\/si>/g)].map((m) => xmlText(m[1], /$^/));
++    for (const n of sheets) for (const row of (await z.read(n)).matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)) {
++      const cells = [...row[1].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)].map((c) => { const val = (c[2] || '').match(/<v>([\s\S]*?)<\/v>/); return /t="s"/.test(c[1]) && val ? shared[+val[1]] ?? '' : val ? unent(val[1]) : xmlText(c[2] || '', /$^/); });
++      if (cells.some((c) => c)) out.push(cells.join('\t'));
++    }
++    return tidy(out.join('\n'));
++  }
++  if (has('content.xml')) return tidy(xmlText(await z.read('content.xml'), /<\/text:p>|<\/text:h>|<text:line-break\/>/g, /<text:tab\/>|<\/table:table-cell>/g));
++  const pages = z.names.filter((n) => /\.x?html?$/i.test(n)).sort();
++  if (pages.length) { for (const n of pages) out.push(html(await z.read(n))); return tidy(out.join('\n\n')); }
++  throw new Error('nothing readable inside');
++}
++
++/* ---------- RTF ---------- */
++function rtf(s) {
++  const SKIP = /^(fonttbl|colortbl|stylesheet|info|pict|object|header|footer|footnote|themedata|datastore|generator|listtable|listoverridetable|rsidtbl|xmlnstbl|latentstyles)$/;
++  let out = '', skip = false; const stack = []; const cp = new TextDecoder('windows-1252');
++  for (let i = 0; i < s.length; i++) {
++    const ch = s[i];
++    if (ch === '{') { stack.push(skip); if (s[i + 1] === '\\' && s[i + 2] === '*') skip = true; }
++    else if (ch === '}') skip = stack.pop() ?? false;
++    else if (ch === '\\') {
++      const m = /^\\([a-z]+)(-?\d+)? ?|^\\'([0-9a-f]{2})|^\\([^a-z])/i.exec(s.slice(i, i + 40)); if (!m) continue; i += m[0].length - 1;
++      if (m[1]) { if (SKIP.test(m[1])) skip = true; if (skip) continue; if (m[1] === 'par' || m[1] === 'line') out += '\n'; else if (m[1] === 'tab') out += '\t'; else if (m[1] === 'u' && m[2]) { out += String.fromCharCode((+m[2] + 65536) % 65536); if (s[i + 1] === '?') i++; } }
++      else if (!skip) out += m[3] ? cp.decode(new Uint8Array([parseInt(m[3], 16)])) : /[{}\\]/.test(m[4]) ? m[4] : '';
++    } else if (!skip && ch !== '\n' && ch !== '\r') out += ch;
++  }
++  return tidy(out);
++}
++
++/* ---------- old Word files (.doc, Word 97–2003) ---------- */
++// They are "compound files": a small file system inside one file. The text sits in the WordDocument
++// stream, and the table stream says which byte ranges hold it and how it is encoded.
++function cfb(buf) {
++  const v = new DataView(buf); if (v.getUint32(0, true) !== 0xe011cfd0) throw new Error('not a compound file');
++  const ss = 1 << v.getUint16(0x1e, true), ms = 1 << v.getUint16(0x20, true), cutoff = v.getUint32(0x38, true);
++  const sec = (id) => (id + 1) * ss, fatSecs = []; for (let i = 0; i < 109; i++) { const s = v.getInt32(0x4c + i * 4, true); if (s >= 0) fatSecs.push(s); }
++  for (let d = v.getInt32(0x44, true), n = 0; d >= 0 && n < 1000; n++) { for (let i = 0; i < ss / 4 - 1; i++) { const s = v.getInt32(sec(d) + i * 4, true); if (s >= 0) fatSecs.push(s); } d = v.getInt32(sec(d) + ss - 4, true); }
++  const fat = []; for (const s of fatSecs) for (let i = 0; i < ss / 4; i++) fat.push(v.getInt32(sec(s) + i * 4, true));
++  const chain = (start, size) => { const out = new Uint8Array(size); let id = start, at = 0; for (let n = 0; id >= 0 && at < size && n < fat.length; n++) { const len = Math.min(ss, size - at); out.set(new Uint8Array(buf, sec(id), len), at); at += len; id = fat[id]; } return out; };
++  const dirStart = v.getInt32(0x30, true); const dirs = []; const dirBytes = chain(dirStart, ss * 512); const dv = new DataView(dirBytes.buffer);
++  for (let o = 0; o + 128 <= dirBytes.length; o += 128) { const nl = dv.getUint16(o + 0x40, true); if (!nl) continue; let name = ''; for (let i = 0; i < nl / 2 - 1; i++) name += String.fromCharCode(dv.getUint16(o + i * 2, true)); dirs.push({ name, type: dirBytes[o + 0x42], start: dv.getInt32(o + 0x74, true), size: dv.getUint32(o + 0x78, true) }); }
++  const root = dirs.find((d) => d.type === 5); const mini = root ? chain(root.start, root.size) : new Uint8Array(0);
++  const minifat = []; { const mf = chain(v.getInt32(0x3c, true), v.getUint32(0x40, true) * ss); const mv = new DataView(mf.buffer); for (let i = 0; i + 4 <= mf.length; i += 4) minifat.push(mv.getInt32(i, true)); }
++  return (name) => {
++    const d = dirs.find((x) => x.name === name && x.type === 2); if (!d) return null;
++    if (d.size >= cutoff) return chain(d.start, d.size);
++    const out = new Uint8Array(d.size); let id = d.start, at = 0; for (let n = 0; id >= 0 && at < d.size && n < minifat.length + 1; n++) { const len = Math.min(ms, d.size - at); out.set(mini.subarray(id * ms, id * ms + len), at); at += len; id = minifat[id]; } return out;
++  };
++}
++function wordDoc(buf) {
++  const stream = cfb(buf); const wd = stream('WordDocument'); if (!wd) throw new Error('not a Word file');
++  const w = new DataView(wd.buffer, wd.byteOffset, wd.byteLength); if (w.getUint16(0, true) !== 0xa5ec) throw new Error('not a Word file');
++  const table = stream(w.getUint16(0x0a, true) & 0x0200 ? '1Table' : '0Table'); if (!table) throw new Error('no table');
++  const csw = w.getUint16(32, true), lw = 34 + csw * 2 + 2, cslw = w.getUint16(34 + csw * 2, true), fc = lw + cslw * 4 + 2;
++  const ccpText = w.getInt32(lw + 12, true), fcClx = w.getUint32(fc + 33 * 8, true), lcbClx = w.getUint32(fc + 33 * 8 + 4, true);
++  const t = new DataView(table.buffer, table.byteOffset, table.byteLength); let p = fcClx; const end = fcClx + lcbClx;
++  while (p < end && table[p] === 1) p += 3 + t.getUint16(p + 1, true);   // skip formatting entries
++  if (table[p] !== 2) throw new Error('no text table'); const lcb = t.getUint32(p + 1, true); p += 5; const n = (lcb - 4) / 12;
++  const cp = (i) => t.getUint32(p + i * 4, true), pcd = (i) => p + (n + 1) * 4 + i * 8; let text = ''; const cp1252 = new TextDecoder('windows-1252'), u16 = new TextDecoder('utf-16le');
++  for (let i = 0; i < n && cp(i) < ccpText; i++) {
++    const len = Math.min(cp(i + 1), ccpText) - cp(i); let f = t.getUint32(pcd(i) + 2, true);
++    if (f & 0x40000000) { f = (f & ~0x40000000) / 2; text += cp1252.decode(wd.subarray(f, f + len)); } else text += u16.decode(wd.subarray(f, f + len * 2));
++  }
++  // fields: keep the shown result, drop the hidden instruction; then turn Word's control marks into plain text
++  let out = ''; const skip = []; for (const ch of text) { const c = ch.charCodeAt(0);
++    if (c === 0x13) { skip.push(true); continue; } if (c === 0x14) { skip[skip.length - 1] = false; continue; } if (c === 0x15) { skip.pop(); continue; }
++    if (skip.some((x) => x)) continue; out += c === 13 || c === 11 || c === 12 ? '\n' : c === 7 ? '\t' : c < 32 && c !== 9 ? '' : ch; }
++  return tidy(out);
++}
++
++/* ---------- anything else: keep whatever looks like words ---------- */
++function strings(buf) {
++  const u8 = new Uint8Array(buf.slice(0, 8 * 1024 * 1024)); const ok = (c) => (c >= 32 && c < 127) || c === 9 || c === 10 || c === 13;
++  const grab = (step) => { const runs = []; let run = '';
++    for (let i = 0; i + step - 1 < u8.length; i += step) { const c = u8[i]; if (ok(c) && (step === 1 || u8[i + 1] === 0)) run += String.fromCharCode(c); else { if (run.length >= 5) runs.push(run); run = ''; } }
++    if (run.length >= 5) runs.push(run); return runs.filter((r) => (r.match(/[a-z]/gi) || []).length > r.length * 0.6 && / /.test(r)); };
++  const a = grab(1), b = grab(2); const best = b.join('').length > a.join('').length ? b : a;
++  return tidy(best.join('\n'));
++}
++
++/* ---------- PDF ---------- */
++async function pdf(file, say) {
++  await loadScript(at('./lib/pdfjs/pdf.min.js')); const lib = window.pdfjsLib; lib.GlobalWorkerOptions.workerSrc = at('./lib/pdfjs/pdf.worker.min.js');
++  const doc = await lib.getDocument({ data: await file.arrayBuffer(), isEvalSupported: false }).promise; const out = [];
++  for (let i = 1; i <= doc.numPages; i++) {
++    say(`Reading page ${i} of ${doc.numPages}`); const page = await doc.getPage(i); const tc = await page.getTextContent(); let line = '', y = null, text = '';
++    for (const it of tc.items) { const ty = it.transform ? it.transform[5] : y; if (y !== null && Math.abs(ty - y) > 2) { text += line + '\n'; line = ''; } line += it.str; if (it.hasEOL) { text += line + '\n'; line = ''; } y = ty; }
++    out.push(text + line);
++  }
++  let text = tidy(out.join('\n\n'));
++  if (text.length < 25 * doc.numPages) {   // a scanned PDF: pages are pictures, so read them like photos
++    const pages = Math.min(doc.numPages, 12); out.length = 0;
++    for (let i = 1; i <= pages; i++) {
++      say(`Reading scanned page ${i} of ${pages}`); const page = await doc.getPage(i); const vp = page.getViewport({ scale: 2 });
++      const c = document.createElement('canvas'); c.width = vp.width; c.height = vp.height; await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
++      out.push(await ocrCanvas(c, () => {}));
++    }
++    text = tidy(out.join('\n\n'));
++  }
++  return text;
++}
++
++/* ---------- pictures: read the text in them ---------- */
++let ocrWorker = null, ocrSay = () => {}, ocrIdle = 0;
++async function ocrCanvas(canvas, say) {
++  await loadScript(at('./lib/ocr/tesseract.min.js')); ocrSay = say; clearTimeout(ocrIdle);
++  ocrWorker ||= await window.Tesseract.createWorker('eng', 1, { workerPath: at('./lib/ocr/worker.min.js'), corePath: at('./lib/ocr/'), langPath: at('./lib/ocr/'), gzip: true, cacheMethod: 'none',
++    logger: (m) => { if (m.status === 'recognizing text') ocrSay(`Reading the picture… ${Math.round(m.progress * 100)}%`); } });
++  const { data } = await ocrWorker.recognize(canvas);
++  ocrIdle = setTimeout(() => { ocrWorker?.terminate(); ocrWorker = null; }, 60000);   // free the memory when not in use
++  return tidy(data.text || '');
++}
++async function picture(file, say) {
++  say('Opening the picture…'); const bmp = await createImageBitmap(file); const k = Math.min(1, 2200 / Math.max(bmp.width, bmp.height));
++  const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k); c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height); bmp.close?.();
++  return ocrCanvas(c, say);
++}
++
++const PLAIN = /\.(txt|md|markdown|csv|tsv|json|xml|log|srt|vtt|ini|ya?ml|tex|py|js|ts|java|c|cpp|h|css|sql|sh|bat)$/;
++export async function readDoc(file, say = () => {}) {
++  const name = file.name.toLowerCase(), type = file.type || '';
++  if (type.startsWith('audio/') || type.startsWith('video/')) throw new Error('Sound and video files cannot be read.');
++  if (type.startsWith('image/') || /\.(png|jpe?g|webp|bmp|gif)$/.test(name)) return picture(file, say);
++  if (type === 'application/pdf' || name.endsWith('.pdf')) return pdf(file, say);
++  if (/\.(x?html?)$/.test(name) || type === 'text/html') return html(await file.text());
++  if (name.endsWith('.rtf') || type.includes('rtf')) return rtf(await file.text());
++  if (type.startsWith('text/') || PLAIN.test(name)) return tidy(await file.text());
++  const buf = await file.arrayBuffer();
++  if (new DataView(buf).byteLength > 8 && new DataView(buf).getUint32(0, true) === 0xe011cfd0) { try { const t = wordDoc(buf); if (t.replace(/\s/g, '').length > 3) return t; } catch (e) { console.warn('old Word reader', e); } }
++  try { return await office(buf); } catch {}
++  return strings(buf);
++}
++
++// A small picture to show in the list: for photos, and for the first page of a PDF.
++export async function thumbOf(file) {
++  try {
++    const name = file.name.toLowerCase(); let src;
++    if ((file.type || '').startsWith('image/') || /\.(png|jpe?g|webp|bmp|gif)$/.test(name)) src = await createImageBitmap(file);
++    else if (file.type === 'application/pdf' || name.endsWith('.pdf')) {
++      await loadScript(at('./lib/pdfjs/pdf.min.js')); const lib = window.pdfjsLib; lib.GlobalWorkerOptions.workerSrc = at('./lib/pdfjs/pdf.worker.min.js');
++      const page = await (await lib.getDocument({ data: await file.arrayBuffer(), isEvalSupported: false }).promise).getPage(1); const vp = page.getViewport({ scale: 0.5 });
++      src = document.createElement('canvas'); src.width = vp.width; src.height = vp.height; await page.render({ canvasContext: src.getContext('2d'), viewport: vp }).promise;
++    } else return null;
++    const k = Math.min(1, 240 / Math.max(src.width, src.height)), c = document.createElement('canvas'); c.width = Math.max(1, Math.round(src.width * k)); c.height = Math.max(1, Math.round(src.height * k));
++    const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(src, 0, 0, c.width, c.height); src.close?.();
++    return c.toDataURL('image/jpeg', 0.72);
++  } catch { return null; }
++}
++
+diff --git a/internot-ai-v0.4/index.html b/internot-ai-v0.4/index.html
+index c7141be..e219c27 100644
+--- a/internot-ai-v0.4/index.html
++++ b/internot-ai-v0.4/index.html
+@@ -44 +44 @@
+-      <div id="map-search-box" class="map-search"><input id="map-search" type="search" placeholder="Search towns, villages, clinics…" autocomplete="off"><ul id="map-results" hidden></ul></div>
++      <div id="map-search-box" class="map-search"><input id="map-search" type="search" placeholder="Search a place or paste a location" autocomplete="off"><button id="map-paste" type="button">Paste</button><ul id="map-results" hidden></ul></div>
+@@ -46 +46 @@
+-      <div class="map-btns"><button id="map-zoom-in" type="button" aria-label="Zoom in">+</button><button id="map-zoom-out" type="button" aria-label="Zoom out">−</button><button id="map-locate" type="button" aria-label="Show my location">◎</button></div>
++      <div class="map-btns"><button id="map-zoom-in" type="button" aria-label="Zoom in">+</button><button id="map-zoom-out" type="button" aria-label="Zoom out">−</button><button id="map-locate" type="button" aria-label="Show my location">◎</button><button id="map-layer" type="button" class="txt" aria-label="Show satellite pictures">Sat</button></div>
+@@ -49 +49 @@
+-      <div class="map-attrib">© OpenStreetMap contributors · Natural Earth</div>
++      <div id="map-attrib" class="map-attrib">© OpenStreetMap contributors · Natural Earth</div>
+@@ -95 +95 @@
+-    <p class="hint">Add notes, memos or lesson material. With “Use my documents” switched on, The Brain finds the most relevant passages and answers from them. Text files only for now (.txt, .md, .csv).</p>
++    <p class="hint">Add notes, memos or lesson material. With “Use my documents” switched on, The Brain finds the most relevant passages and answers from them. Add almost any file: Word, PDF, Excel, PowerPoint, text, web pages, and photos or screenshots of printed text. Everything is read on this device.</p>
+@@ -101 +101 @@
+-        <label class="button">Add text file<input id="doc-file" type="file" accept=".txt,.md,.csv,text/plain" multiple hidden></label>
++        <label class="button">Add files or photos<input id="doc-file" type="file" multiple hidden></label>
+@@ -102,0 +103 @@
++      <p id="doc-status" class="hint" role="status"></p>
+diff --git a/internot-ai-v0.4/maps.js b/internot-ai-v0.4/maps.js
+index 4b340a2..e4b1521 100644
+--- a/internot-ai-v0.4/maps.js
++++ b/internot-ai-v0.4/maps.js
+@@ -9 +9 @@ const SPEED = [100, 90, 80, 60, 50, 40, 30, 20, 20];            // km/h by road
+-const ROAD_MINZ = [0, 0, 0, 8.5, 10, 11.5, 12.5, 14, 13];       // zoom at which each class appears
++const ROAD_MINZ = [4.5, 4.5, 6, 8.5, 10.5, 12, 13, 14.5, 13.5];       // zoom at which each class appears
+@@ -12 +12 @@ const ROAD_COL = ['#d97757', '#d97757', '#e39a7d', '#eebf9d', '#ffffff', '#fffff
+-const PLACE_MINZ = [0, 0, 10.5, 12.5, 12.5, 13.5, 14, 14, 14, 14.5, 15, 15, 15, 15];
++const PLACE_MINZ = [0, 7, 10.5, 12.5, 12.5, 13.5, 14, 14, 14, 14.5, 15, 15, 15, 15];
+@@ -26,0 +27 @@ const toSY = (y) => (y - M.view.cy) / upp() + M.h / 2;
++const xToLon = (x) => x / TWO32 * 360 - 180, yToLat = (y) => Math.atan(Math.sinh(Math.PI * (1 - 2 * y / TWO32))) * 180 / Math.PI;
+@@ -172,10 +173,21 @@ function draw() { if (!M.raf) M.raf = requestAnimationFrame(() => { M.raf = 0; p
+-function paint() {
+-  const map = M.map, c = $('map-canvas'); if (!map || !M.w) return;
+-  const ctx = c.getContext('2d'); ctx.setTransform(M.dpr, 0, 0, M.dpr, 0, 0);
+-  const u = upp(), z = M.view.z, { X, Y, wayStart, wayNodes, wayClass, box, W } = map;
+-  const x0 = M.view.cx - M.w / 2 * u, x1 = M.view.cx + M.w / 2 * u, y0 = M.view.cy - M.h / 2 * u, y1 = M.view.cy + M.h / 2 * u;
+-  const ox = M.w / 2 - M.view.cx / u, oy = M.h / 2 - M.view.cy / u;
+-  const wd = M.world, sea = wd && z < 9; ctx.fillStyle = sea ? '#d3e3ee' : '#f3f0e7';   // zoomed in, the sea fill is skipped: it is not accurate enough at street level ctx.fillRect(0, 0, M.w, M.h);
+-  if (wd) {   // land and country borders, drawn from one cached outline
+-    const s = TWO32 / wd.grid / u; ctx.save(); ctx.setTransform(M.dpr * s, 0, 0, M.dpr * s, M.dpr * ox, M.dpr * oy);
+-    if (sea) { ctx.fillStyle = '#f3f0e7'; ctx.fill(wd.path); } ctx.lineWidth = 1.1 / s; ctx.strokeStyle = '#bfb39a'; ctx.stroke(wd.path); ctx.restore();
++/* ---------- satellite pictures ---------- */
++// Built in: the whole world from far out, and Lesotho closer in. Anything else is fetched when there is
++// internet and kept on the phone, so places you have looked at once stay visible offline.
++const SAT = { tiles: new Map(), local: null, remoteMax: 14, url: (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2016_3857/default/g/${z}/${y}/${x}.jpg` };
++const SAT_CREDIT = 'Sentinel-2 cloudless – s2maps.eu by EOX IT Services GmbH (contains modified Copernicus Sentinel data 2016 & 2017)';
++async function satInit() { try { const r = await fetch('./sat/index.json'); if (r.ok) { SAT.local = await r.json(); if (M.sat) draw(); } } catch {} }
++function satLocal(z, x, y) {
++  const L = SAT.local; if (!L) return false; if (z <= L.world) return true; if (z > L.max) return false; const n = 2 ** z, t = (v) => Math.floor(v / TWO32 * n);
++  return x >= t(lonToX(L.box[0])) && x <= t(lonToX(L.box[2])) && y >= t(latToY(L.box[3])) && y <= t(latToY(L.box[1]));
++}
++const loadImg = (src) => new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = src; });
++async function loadRemote(url) {
++  let cache = null; try { cache = await caches.open('internot-sat'); const hit = await cache.match(url); if (hit) return await createImageBitmap(await hit.blob()); } catch {}
++  if (!navigator.onLine) throw new Error('offline');
++  const r = await fetch(url); if (!r.ok) throw new Error('no picture'); cache?.put(url, r.clone()).catch(() => {}); return createImageBitmap(await r.blob());
++}
++function satTile(z, x, y) {
++  const key = z + '/' + x + '/' + y; let t = SAT.tiles.get(key);
++  if (t) {
++    if (t.state === 'missing' && navigator.onLine && Date.now() - t.at > 20000 && !satLocal(z, x, y)) SAT.tiles.delete(key);
++    else { if (t.img) { SAT.tiles.delete(key); SAT.tiles.set(key, t); } return t; }
+@@ -183,2 +195,85 @@ function paint() {
+-  const paths = []; const minSize = 1.5 * u;
+-  for (let w = 0; w < W; w++) {
++  t = { state: 'loading', img: null, at: Date.now() }; SAT.tiles.set(key, t);
++  const done = (img) => { t.img = img; t.state = img ? 'ready' : 'missing'; t.at = Date.now(); if (img && M.sat) draw();
++    if (SAT.tiles.size > 240) for (const [k, v] of SAT.tiles) { if (SAT.tiles.size <= 180) break; if (v.state !== 'loading') { v.img?.close?.(); SAT.tiles.delete(k); } } };
++  (satLocal(z, x, y) ? loadImg(`./sat/${z}/${x}/${y}.jpg`) : loadRemote(SAT.url(z, x, y))).then(done, () => done(null));
++  return t;
++}
++function paintSat(ctx, u, z, ox, oy, x0, y0, x1, y1) {
++  const zt = Math.max(0, Math.min(SAT.remoteMax, Math.round(z + 0.2))), n = 2 ** zt, span = TWO32 / n, px = span / u;
++  const ax = Math.max(0, Math.floor(x0 / span)), bx = Math.min(n - 1, Math.floor(x1 / span)), ay = Math.max(0, Math.floor(y0 / span)), by = Math.min(n - 1, Math.floor(y1 / span));
++  for (let ty = ay; ty <= by; ty++) for (let tx = ax; tx <= bx; tx++) {
++    const dx = tx * px + ox, dy = ty * px + oy; const t = satTile(zt, tx, ty);
++    if (t.img) { ctx.drawImage(t.img, dx, dy, px + 0.6, px + 0.6); continue; }
++    for (let up = 1; up <= 9 && zt - up >= 0; up++) {   // until it arrives, show the nearest wider picture
++      const p = satTile(zt - up, tx >> up, ty >> up); if (!p.img) continue;
++      const k = 2 ** up, s = p.img.width / k; ctx.drawImage(p.img, (tx % k) * s, (ty % k) * s, s, s, dx, dy, px + 0.6, px + 0.6); break;
++    }
++  }
++}
++function setSat(on) {
++  M.sat = on; try { localStorage.setItem('mapSat', on ? '1' : ''); } catch {}
++  $('map-layer').textContent = on ? 'Map' : 'Sat'; $('map-layer').setAttribute('aria-label', on ? 'Show the street map' : 'Show satellite pictures');
++  $('map-attrib').textContent = '© OpenStreetMap contributors · Natural Earth' + (on ? ' · ' + SAT_CREDIT : '');
++  if (on && !navigator.onLine && M.view.z > (SAT.local ? SAT.local.max : 0) + 1.5) msg('Offline, satellite pictures are sharp for Lesotho and for places you looked at while online.');
++  draw();
++}
++
++/* ---------- moving the view smoothly ---------- */
++function flyTo(x, y, z, ms = 420) {
++  cancelAnimationFrame(M.anim); const a = { ...M.view }, t0 = performance.now();
++  const step = (now) => { const t = Math.min(1, (now - t0) / ms), e = 1 - (1 - t) ** 3; M.view.cx = a.cx + (x - a.cx) * e; M.view.cy = a.cy + (y - a.cy) * e; M.view.z = a.z + (z - a.z) * e; paint(); if (t < 1) M.anim = requestAnimationFrame(step); };
++  M.anim = requestAnimationFrame(step);
++}
++
++/* ---------- a location pasted from WhatsApp, Google Maps or anywhere else ---------- */
++export function parseLocation(text) {
++  const t = String(text || '').trim(); if (t.length < 5) return null; const N = '(-?\\d{1,3}(?:\\.\\d+)?)';
++  const ok = (lat, lon) => (Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && (lat || lon) ? { lat, lon } : null);
++  let m = new RegExp(`(?:[?&](?:q|query|ll|sll|daddr|destination|center|loc|coordinate)=(?:loc:)?|geo:|/@|/place/|/search/)${N}(?:,|%2C)\\+?\\s*${N}`, 'gi'); for (const g of t.matchAll(m)) { const r = ok(+g[1], +g[2]); if (r) return r; }
++  m = /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/.exec(t); if (m) return ok(+m[1], +m[2]);
++  m = /[?&]mlat=(-?\d+\.\d+)&mlon=(-?\d+\.\d+)/.exec(t) || /#map=\d+\/(-?\d+\.\d+)\/(-?\d+\.\d+)/.exec(t); if (m) return ok(+m[1], +m[2]);
++  m = /(\d{1,2}(?:\.\d+)?)\s*°?\s*([NS])[\s,;]+(\d{1,3}(?:\.\d+)?)\s*°?\s*([EW])/i.exec(t); if (m) return ok(+m[1] * (/s/i.test(m[2]) ? -1 : 1), +m[3] * (/w/i.test(m[4]) ? -1 : 1));
++  if (/goo\.gl|maps\.app/i.test(t)) return { short: true };
++  // degrees, minutes and seconds, e.g. 29°18'36.0"S 27°29'00.0"E
++  const dms = /(\d{1,3})\s*[°º]\s*(\d{1,2})\s*['′’]\s*(?:(\d{1,2}(?:\.\d+)?)\s*(?:["″”]|'')?)?\s*([NSEW])/gi; const parts = [...t.matchAll(dms)];
++  if (parts.length >= 2) {
++    const v = (p) => (+p[1] + +p[2] / 60 + (+p[3] || 0) / 3600) * (/[SW]/i.test(p[4]) ? -1 : 1);
++    const la = parts.find((p) => /[NS]/i.test(p[4])), lo = parts.find((p) => /[EW]/i.test(p[4])); if (la && lo) return ok(v(la), v(lo));
++  }
++  m = /^\s*(-?\d{1,2}\.\d{2,})\s*[,;\s]\s*(-?\d{1,3}\.\d{2,})\s*$/.exec(t); if (m) return ok(+m[1], +m[2]);   // just two numbers
++  m = /(?:^|[^\d.\-])(-?\d{1,2}\.\d{3,})\s*[,;\s]\s*(-?\d{1,3}\.\d{3,})(?![\d.])/.exec(t); if (m) return ok(+m[1], +m[2]);
++  return null;
++}
++function goLocation(loc) {
++  const x = lonToX(loc.lon), y = latToY(loc.lat); M.follow = false; $('map-results').hidden = true; $('map-search').blur();
++  flyTo(x, y, Math.max(M.view.z, 15)); pickAt(x, y, 'Pasted location');
++}
++async function copyText(text) {
++  try { await navigator.clipboard.writeText(text); return true; } catch {}
++  const ta = document.createElement('textarea'); ta.value = text; ta.style.cssText = 'position:fixed;opacity:0'; document.body.append(ta); ta.select(); let ok = false; try { ok = document.execCommand('copy'); } catch {} ta.remove(); return ok;
++}
++
++/* ---------- roads: drawn once into small square pictures (tiles), then reused while you move ---------- */
++// Re-drawing every road on every frame is too slow on low-cost phones; placing ready pictures is fast.
++const TILE = 256;
++const RT = { cache: new Map(), map: null, res: Math.min(1.5, window.devicePixelRatio || 1), max: 72 };
++function wayGrid(map) {
++  const G = 128, [bx0, by0, bx1, by1] = map.bbox, cw = Math.max(1, (bx1 - bx0 + 1) / G), ch = Math.max(1, (by1 - by0 + 1) / G), { box, W } = map;
++  const span = (w) => [Math.max(0, Math.min(G - 1, Math.floor((box[w * 4] - bx0) / cw))), Math.max(0, Math.min(G - 1, Math.floor((box[w * 4 + 2] - bx0) / cw))), Math.max(0, Math.min(G - 1, Math.floor((box[w * 4 + 1] - by0) / ch))), Math.max(0, Math.min(G - 1, Math.floor((box[w * 4 + 3] - by0) / ch)))];
++  const start = new Uint32Array(G * G + 1);
++  for (let w = 0; w < W; w++) { const [a, b, c, d] = span(w); for (let y = c; y <= d; y++) for (let x = a; x <= b; x++) start[y * G + x + 1]++; }
++  for (let i = 0; i < G * G; i++) start[i + 1] += start[i];
++  const items = new Uint32Array(start[G * G]), fill = start.slice(0, G * G);
++  for (let w = 0; w < W; w++) { const [a, b, c, d] = span(w); for (let y = c; y <= d; y++) for (let x = a; x <= b; x++) items[fill[y * G + x]++] = w; }
++  map.wg = { G, cw, ch, start, items, stamp: new Uint32Array(W), n: 0 };
++}
++function forWays(map, qx0, qy0, qx1, qy1, fn) {
++  const g = map.wg, [bx0, by0] = map.bbox, G = g.G; if (++g.n === 0xffffffff) { g.stamp.fill(0); g.n = 1; }
++  const a = Math.max(0, Math.floor((qx0 - bx0) / g.cw)), b = Math.min(G - 1, Math.floor((qx1 - bx0) / g.cw)), c = Math.max(0, Math.floor((qy0 - by0) / g.ch)), d = Math.min(G - 1, Math.floor((qy1 - by0) / g.ch));
++  for (let y = c; y <= d; y++) for (let x = a; x <= b; x++) { const cell = y * G + x; for (let i = g.start[cell]; i < g.start[cell + 1]; i++) { const w = g.items[i]; if (g.stamp[w] !== g.n) { g.stamp[w] = g.n; fn(w); } } }
++}
++function renderTile(Z, tx, ty, sat) {
++  const map = M.map, span = TWO32 / 2 ** Z, tu = span / TILE, X0 = tx * span, Y0 = ty * span, r = RT.res, { X, Y, wayStart, wayNodes, wayClass, box } = map;
++  const cv = document.createElement('canvas'); cv.width = cv.height = Math.round(TILE * r); const g = cv.getContext('2d'); g.setTransform(r, 0, 0, r, 0, 0);
++  const m = 14 * tu, paths = [], minSize = 1.5 * tu;
++  forWays(map, X0 - m, Y0 - m, X0 + span + m, Y0 + span + m, (w) => {
+@@ -186,4 +281,4 @@ function paint() {
+-    if (cls < 20 && z < ROAD_MINZ[cls]) continue;
+-    const b = w * 4; if (box[b] > x1 || box[b + 2] < x0 || box[b + 1] > y1 || box[b + 3] < y0) continue;
+-    if (cls > 3 && box[b + 2] - box[b] < minSize && box[b + 3] - box[b + 1] < minSize) continue;
+-    const p = (paths[slot] ||= new Path2D()); let lx = -1e9, ly = -1e9; const end = wayStart[w + 1];
++    if (cls < 20 && Z + 0.25 < ROAD_MINZ[cls]) return; if (slot === 9 && (sat || Z < 9)) return;
++    const b = w * 4; if (box[b] > X0 + span + m || box[b + 2] < X0 - m || box[b + 1] > Y0 + span + m || box[b + 3] < Y0 - m) return;
++    if (cls > 3 && box[b + 2] - box[b] < minSize && box[b + 3] - box[b + 1] < minSize) return;
++    const p = (paths[slot] ||= new Path2D()); let lx = 0, ly = 0, px = 0, py = 0, pen = false; const end = wayStart[w + 1], L = -64, R = TILE + 64;
+@@ -191,3 +286,6 @@ function paint() {
+-      const n = wayNodes[i]; const sx = X[n] / u + ox, sy = Y[n] / u + oy;
+-      if (i === wayStart[w]) { p.moveTo(sx, sy); lx = sx; ly = sy; }
+-      else if (i === end - 1 || Math.abs(sx - lx) + Math.abs(sy - ly) > 1.5) { p.lineTo(sx, sy); lx = sx; ly = sy; }
++      const n = wayNodes[i]; const sx = (X[n] - X0) / tu, sy = (Y[n] - Y0) / tu;
++      if (i === wayStart[w]) { px = sx; py = sy; continue; }
++      if ((px < L && sx < L) || (px > R && sx > R) || (py < L && sy < L) || (py > R && sy > R)) { pen = false; px = sx; py = sy; continue; }   // this piece is outside the tile
++      if (!pen) { p.moveTo(px, py); lx = px; ly = py; pen = true; }
++      if (i === end - 1 || Math.abs(sx - lx) + Math.abs(sy - ly) > 1.2) { p.lineTo(sx, sy); lx = sx; ly = sy; }
++      px = sx; py = sy;
+@@ -195,6 +293,6 @@ function paint() {
+-  }
+-  const k = Math.min(2.4, Math.max(0.5, 0.5 + (z - 10) * 0.2));
+-  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+-  if (paths[9]) { ctx.strokeStyle = '#9fc4e4'; ctx.lineWidth = 2.2 * k; ctx.stroke(paths[9]); }
+-  for (let cls = 8; cls >= 0; cls--) {          // casings first, so junctions join cleanly
+-    if (!paths[cls] || cls === 8) continue; ctx.strokeStyle = cls <= 3 ? '#b9623f' : '#cdc6b4'; ctx.lineWidth = ROAD_W[cls] * k + 1.6; ctx.stroke(paths[cls]);
++  });
++  const k = Math.min(2.4, Math.max(0.28, 0.28 + (Z - 8) * 0.16)) * (sat ? 0.7 : 1), edge = k < 0.6 ? 0.9 : 1.6;
++  g.lineCap = 'round'; g.lineJoin = 'round';
++  if (paths[9]) { g.strokeStyle = '#9fc4e4'; g.lineWidth = 2.2 * k; g.stroke(paths[9]); }
++  for (let cls = 7; cls >= 0; cls--) {          // casings first, so junctions join cleanly
++    if (!paths[cls]) continue; g.strokeStyle = sat ? 'rgba(0,0,0,.45)' : cls <= 3 ? '#b9623f' : '#cdc6b4'; g.lineWidth = ROAD_W[cls] * k + edge; g.stroke(paths[cls]);
+@@ -203,2 +301,27 @@ function paint() {
+-    if (!paths[cls]) continue; ctx.strokeStyle = ROAD_COL[cls]; ctx.lineWidth = ROAD_W[cls] * k;
+-    ctx.setLineDash(cls === 8 ? [5, 4] : []); ctx.stroke(paths[cls]);
++    if (!paths[cls]) continue; g.strokeStyle = !sat ? ROAD_COL[cls] : cls <= 3 ? '#ffd27a' : 'rgba(255,255,255,.85)'; g.lineWidth = ROAD_W[cls] * k;
++    g.setLineDash(cls === 8 ? [5, 4] : []); g.stroke(paths[cls]);
++  }
++  return cv;
++}
++function paintRoads(ctx, u, z, x0, y0, x1, y1, sat) {
++  const map = M.map; if (!map.W) return;
++  if (RT.map !== map) { RT.cache.clear(); RT.map = map; wayGrid(map); }
++  const Z = Math.max(0, Math.min(18, Math.round(z))), span = TWO32 / 2 ** Z, px = span / u, [bx0, by0, bx1, by1] = map.bbox;
++  const ax = Math.floor(Math.max(x0, bx0) / span), bx = Math.floor(Math.min(x1, bx1) / span), ay = Math.floor(Math.max(y0, by0) / span), by = Math.floor(Math.min(y1, by1) / span);
++  if (ax > bx || ay > by) return;
++  const ox = M.w / 2 - M.view.cx / u, oy = M.h / 2 - M.view.cy / u, S = sat ? 1 : 0, t0 = performance.now(), cx = M.view.cx / span, cy = M.view.cy / span;
++  const list = [];
++  for (let ty = ay; ty <= by; ty++) for (let tx = ax; tx <= bx; tx++) list.push([tx, ty, (tx + 0.5 - cx) ** 2 + (ty + 0.5 - cy) ** 2]);
++  list.sort((a, b) => a[2] - b[2]);   // the middle of the screen first
++  let made = 0, more = false;
++  for (const [tx, ty] of list) {
++    const key = Z + '/' + tx + '/' + ty + '/' + S; let t = RT.cache.get(key);
++    if (t) { RT.cache.delete(key); RT.cache.set(key, t); }
++    else if (made === 0 || performance.now() - t0 < 10) { t = renderTile(Z, tx, ty, sat); made++; RT.cache.set(key, t); if (RT.cache.size > RT.max) RT.cache.delete(RT.cache.keys().next().value); }
++    else more = true;
++    const dx = Math.round(tx * px + ox), dy = Math.round(ty * px + oy), dw = Math.round((tx + 1) * px + ox) - dx, dh = Math.round((ty + 1) * px + oy) - dy;
++    if (t) { ctx.drawImage(t, dx, dy, dw, dh); continue; }
++    for (let up = 1; up <= 4 && Z - up >= 0; up++) {   // until it is ready, stretch a wider tile over the gap
++      const p = RT.cache.get((Z - up) + '/' + (tx >> up) + '/' + (ty >> up) + '/' + S); if (!p) continue;
++      const k = 2 ** up, s = p.width / k; ctx.drawImage(p, (tx % k) * s, (ty % k) * s, s, s, dx, dy, dw, dh); break;
++    }
+@@ -206 +329,2 @@ function paint() {
+-  ctx.setLineDash([]);
++  if (more) draw();
++}
+@@ -208,3 +332,28 @@ function paint() {
+-  if (M.route) {
+-    const r = M.route; ctx.beginPath();
+-    for (let i = 0; i < r.nodes.length; i++) { const n = r.nodes[i]; const sx = X[n] / u + ox, sy = Y[n] / u + oy; i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); }
++function paint() {
++  const map = M.map, c = $('map-canvas'); if (!map || !M.w) return;
++  const ctx = c.getContext('2d');
++  // Start every frame from a blank, fully reset canvas (some phones otherwise keep the last picture underneath).
++  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.clearRect(0, 0, c.width, c.height);
++  ctx.setTransform(M.dpr, 0, 0, M.dpr, 0, 0);
++  const u = upp(), z = M.view.z, { X, Y } = map;
++  const x0 = M.view.cx - M.w / 2 * u, x1 = M.view.cx + M.w / 2 * u, y0 = M.view.cy - M.h / 2 * u, y1 = M.view.cy + M.h / 2 * u;
++  const ox = M.w / 2 - M.view.cx / u, oy = M.h / 2 - M.view.cy / u;
++  const wd = M.world, sat = M.sat, sea = wd && z < 9 && !sat;
++  ctx.fillStyle = sat ? '#1c2a33' : sea ? '#d3e3ee' : '#f3f0e7'; ctx.fillRect(0, 0, M.w, M.h);
++  if (sat) paintSat(ctx, u, z, ox, oy, x0, y0, x1, y1);
++  const halo = sat ? 'rgba(0,0,0,.72)' : 'rgba(243,240,231,.92)';
++  if (wd && z < 10) {   // land and country borders, drawn from one cached outline (not needed at street level)
++    const s = TWO32 / wd.grid / u; ctx.save(); ctx.setTransform(M.dpr * s, 0, 0, M.dpr * s, M.dpr * ox, M.dpr * oy);
++    if (sea) { ctx.fillStyle = '#f3f0e7'; ctx.fill(wd.path); } ctx.lineWidth = 1.1 / s; ctx.strokeStyle = sat ? 'rgba(255,255,255,.6)' : '#bfb39a'; ctx.stroke(wd.path); ctx.restore();
++  }
++  paintRoads(ctx, u, z, x0, y0, x1, y1, sat);
++
++  if (M.route) {   // pieces far off the screen are left out: huge numbers upset some phones' graphics chips
++    const r = M.route; ctx.beginPath(); let px = 0, py = 0, pen = false; const L = -400, R = M.w + 400, T = -400, B = M.h + 400;
++    for (let i = 0; i < r.nodes.length; i++) {
++      const n = r.nodes[i]; const sx = X[n] / u + ox, sy = Y[n] / u + oy;
++      if (!i) { px = sx; py = sy; continue; }
++      if ((px < L && sx < L) || (px > R && sx > R) || (py < T && sy < T) || (py > B && sy > B)) pen = false;
++      else { if (!pen) ctx.moveTo(px, py); ctx.lineTo(sx, sy); pen = true; }
++      px = sx; py = sy;
++    }
+@@ -223,2 +372,2 @@ function paint() {
+-    ctx.strokeStyle = 'rgba(243,240,231,.92)'; ctx.lineWidth = 4; ctx.strokeText(p.name, tx, sy);
+-    ctx.fillStyle = poi ? '#7a4a36' : '#2b2a27'; ctx.fillText(p.name, tx, sy);
++    ctx.strokeStyle = halo; ctx.lineWidth = 4; ctx.strokeText(p.name, tx, sy);
++    ctx.fillStyle = sat ? '#fff' : poi ? '#7a4a36' : '#2b2a27'; ctx.fillText(p.name, tx, sy);
+@@ -233 +382 @@ function paint() {
+-      ctx.strokeStyle = 'rgba(243,240,231,.92)'; ctx.lineWidth = 4; ctx.strokeText(p.name, tx, sy); ctx.fillStyle = col; ctx.fillText(p.name, tx, sy);
++      ctx.strokeStyle = halo; ctx.lineWidth = 4; ctx.strokeText(p.name, tx, sy); ctx.fillStyle = sat ? '#fff' : col; ctx.fillText(p.name, tx, sy);
+@@ -245,0 +395,3 @@ function paint() {
++    if (M.gps.heading != null) {   // a small arrow showing which way you are moving
++      ctx.save(); ctx.translate(sx, sy); ctx.rotate(M.gps.heading); ctx.beginPath(); ctx.moveTo(0, -19); ctx.lineTo(7, -9); ctx.lineTo(-7, -9); ctx.closePath(); ctx.fillStyle = '#2f6fde'; ctx.fill(); ctx.restore();
++    }
+@@ -405 +557 @@ async function startNav() {
+-  if (!M.route) return; ensureGps(); msg('');
++  if (!M.route) return; if (M.route.total < 40) { msg('You are already at this place.'); return; } ensureGps(); msg('');
+@@ -435 +587,3 @@ function renderSheet() {
+-  if (M.nav) { sheet.hidden = false; row.append(button('End navigation', 'danger', () => endNav(false)), button(M.mute ? 'Voice off' : 'Voice on', '', () => { M.mute = !M.mute; if (M.mute) hush(); renderSheet(); })); sheet.append(row); return; }
++  if (M.nav) { sheet.hidden = false; row.append(button('End navigation', 'danger', () => endNav(false)), button(M.mute ? 'Voice off' : 'Voice on', '', () => { M.mute = !M.mute; if (M.mute) hush(); renderSheet(); }));
++    if (!M.follow) row.append(button('Re-centre', 'primary', () => { M.follow = true; if (M.gps) flyTo(M.gps.x, M.gps.y, Math.max(M.view.z, 16)); renderSheet(); }));
++    sheet.append(row); return; }
+@@ -445 +599,2 @@ function renderSheet() {
+-    title.textContent = M.pick.label;
++    title.textContent = M.pick.label; const lat = yToLat(M.pick.y).toFixed(5), lon = xToLon(M.pick.x).toFixed(5);
++    const sub = document.createElement('small'); sub.className = 'sheet-sub'; sub.textContent = `${lat}, ${lon}`; title.append(sub);
+@@ -447,0 +603 @@ function renderSheet() {
++      button('Copy location', '', async () => msg((await copyText(`https://maps.google.com/?q=${lat},${lon}`)) ? 'Location copied. Paste it into WhatsApp or an SMS.' : 'Could not copy on this phone.')),
+@@ -457,0 +614 @@ function pickAt(x, y, label) {
++    if (M.gps && Math.hypot(M.gps.x - x, M.gps.y - y) < 24 * u) best = { x: M.gps.x, y: M.gps.y, name: 'My location' }; else
+@@ -467 +624,6 @@ function search(q) {
+-  const box = $('map-results'); box.textContent = ''; q = q.trim().toLowerCase(); if (q.length < 2 || !M.map) { box.hidden = true; return; }
++  const box = $('map-results'); box.textContent = ''; const loc = parseLocation(q); q = q.trim().toLowerCase(); if (q.length < 2 || !M.map) { box.hidden = true; return; }
++  if (loc) {
++    const li = document.createElement('li'); box.append(li); box.hidden = false;
++    if (loc.short) { li.className = 'none'; li.textContent = 'This is a short link, which only opens with internet. Ask for the location pin or the coordinates instead.'; return; }
++    li.textContent = 'Go to this location'; const sm = document.createElement('small'); sm.textContent = `${loc.lat.toFixed(5)}, ${loc.lon.toFixed(5)}`; li.append(sm); li.onclick = () => goLocation(loc); return;
++  }
+@@ -475 +637 @@ function search(q) {
+-    li.onclick = () => { box.hidden = true; $('map-search').value = p.name; $('map-search').blur(); M.follow = false; M.view.cx = p.x; M.view.cy = p.y; M.view.z = p.kind === 'country' ? 5 : p.kind ? 9 : Math.max(M.view.z, p.t <= 1 ? 13 : 15.5); pickAt(p.x, p.y, p.name); };
++    li.onclick = () => { box.hidden = true; $('map-search').value = p.name; $('map-search').blur(); M.follow = false; flyTo(p.x, p.y, p.kind === 'country' ? 5 : p.kind ? 9 : Math.max(M.view.z, p.t <= 1 ? 13 : 15.5)); pickAt(p.x, p.y, p.name); };
+@@ -484,2 +646,10 @@ function wireCanvas() {
+-  const c = $('map-canvas'); const pts = new Map(); let moved = 0, downAt = 0, pinch = 0;
+-  const zoomAt = (sx, sy, dz) => { const before = fromS(sx, sy); M.view.z = Math.min(19, Math.max(1.5, M.view.z + dz)); const after = fromS(sx, sy); M.view.cx += before.x - after.x; M.view.cy += before.y - after.y; draw(); };
++  const c = $('map-canvas'); const pts = new Map(); let moved = 0, downAt = 0, pinch = 0, mid = null, lastTap = 0, tapTimer = 0, vel = { x: 0, y: 0, t: 0 }, fling = 0;
++  const clampZ = (z) => Math.min(19, Math.max(1.5, z));
++  const anchor = (sx, sy, w) => { M.view.cx = w.x - (sx - M.w / 2) * upp(); M.view.cy = w.y - (sy - M.h / 2) * upp(); };
++  const zoomAt = (sx, sy, dz) => { const w = fromS(sx, sy); M.view.z = clampZ(M.view.z + dz); anchor(sx, sy, w); draw(); };
++  const glideZoom = (sx, sy, dz) => {   // zoom smoothly, keeping the touched point where it is
++    const w = fromS(sx, sy), z0 = M.view.z, z1 = clampZ(z0 + dz), t0 = performance.now(); cancelAnimationFrame(M.anim);
++    const step = (now) => { const t = Math.min(1, (now - t0) / 220); M.view.z = z0 + (z1 - z0) * (1 - (1 - t) ** 3); anchor(sx, sy, w); paint(); if (t < 1) M.anim = requestAnimationFrame(step); };
++    M.anim = requestAnimationFrame(step);
++  };
++  const unfollow = () => { if (!M.follow) return; M.follow = false; $('map-locate').classList.remove('on'); if (M.nav) renderSheet(); };
+@@ -487 +657,4 @@ function wireCanvas() {
+-  c.addEventListener('pointerdown', (e) => { c.setPointerCapture(e.pointerId); pts.set(e.pointerId, local(e)); if (pts.size === 1) { moved = 0; downAt = Date.now(); } pinch = 0; });
++  c.addEventListener('pointerdown', (e) => {
++    cancelAnimationFrame(M.anim); cancelAnimationFrame(fling); try { c.setPointerCapture(e.pointerId); } catch {} pts.set(e.pointerId, local(e));
++    if (pts.size === 1) { moved = 0; downAt = Date.now(); vel = { x: 0, y: 0, t: performance.now() }; } pinch = 0; mid = null;
++  });
+@@ -490,2 +663,9 @@ function wireCanvas() {
+-    if (pts.size === 1) { const dx = cur.x - prev.x, dy = cur.y - prev.y; moved += Math.abs(dx) + Math.abs(dy); if (moved > 6) { M.follow = false; M.view.cx -= dx * upp(); M.view.cy -= dy * upp(); draw(); } }
+-    else if (pts.size === 2) { const [a, b] = [...pts.values()]; const d = Math.hypot(a.x - b.x, a.y - b.y); if (pinch) zoomAt((a.x + b.x) / 2, (a.y + b.y) / 2, Math.log2(d / pinch)); pinch = d; moved = 99; }
++    if (pts.size === 1) {
++      const dx = cur.x - prev.x, dy = cur.y - prev.y; moved += Math.abs(dx) + Math.abs(dy); if (moved <= 6) return;
++      unfollow(); M.view.cx -= dx * upp(); M.view.cy -= dy * upp(); const now = performance.now(), dt = Math.max(1, now - vel.t);
++      vel = { x: 0.6 * dx / dt + 0.4 * vel.x, y: 0.6 * dy / dt + 0.4 * vel.y, t: now }; draw();
++    } else if (pts.size === 2) {   // two fingers: zoom around the point between them, and move with it
++      const [a, b] = [...pts.values()]; const d = Math.hypot(a.x - b.x, a.y - b.y), m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
++      if (pinch && mid) { M.view.cx -= (m.x - mid.x) * upp(); M.view.cy -= (m.y - mid.y) * upp(); zoomAt(m.x, m.y, Math.log2(d / pinch)); }
++      pinch = d; mid = m; moved = 9999; unfollow();
++    }
+@@ -493,2 +673,12 @@ function wireCanvas() {
+-  const up = (e) => { if (!pts.has(e.pointerId)) return; const p = pts.get(e.pointerId); pts.delete(e.pointerId); pinch = 0; if (!pts.size && moved <= 6 && Date.now() - downAt < 500 && M.map) { const w = fromS(p.x, p.y); pickAt(w.x, w.y); } };
+-  c.addEventListener('pointerup', up); c.addEventListener('pointercancel', (e) => { pts.delete(e.pointerId); pinch = 0; });
++  const up = (e) => {
++    if (!pts.has(e.pointerId)) return; const p = pts.get(e.pointerId); pts.delete(e.pointerId); pinch = 0; mid = null; if (pts.size) return;
++    if (moved > 6) {   // let the map keep sliding a little after a quick swipe
++      let vx = vel.x, vy = vel.y, last = performance.now(); if (moved >= 9999 || last - vel.t > 90 || Math.hypot(vx, vy) < 0.25) return;
++      const slide = (now) => { const dt = Math.min(40, now - last); last = now; M.view.cx -= vx * dt * upp(); M.view.cy -= vy * dt * upp(); const f = 0.995 ** dt; vx *= f; vy *= f; paint(); if (Math.hypot(vx, vy) > 0.03) fling = requestAnimationFrame(slide); };
++      fling = requestAnimationFrame(slide); return;
++    }
++    if (!M.map) return; const now = Date.now();
++    if (now - lastTap < 300) { clearTimeout(tapTimer); lastTap = 0; glideZoom(p.x, p.y, 1); return; }   // double tap: zoom in
++    lastTap = now; const w = fromS(p.x, p.y); tapTimer = setTimeout(() => pickAt(w.x, w.y), 260);
++  };
++  c.addEventListener('pointerup', up); c.addEventListener('pointercancel', (e) => { pts.delete(e.pointerId); pinch = 0; mid = null; });
+@@ -496,2 +686,8 @@ function wireCanvas() {
+-  $('map-zoom-in').onclick = () => zoomAt(M.w / 2, M.h / 2, 1); $('map-zoom-out').onclick = () => zoomAt(M.w / 2, M.h / 2, -1);
+-  $('map-locate').onclick = () => { ensureGps(); if (M.gps) { M.follow = true; M.view.cx = M.gps.x; M.view.cy = M.gps.y; if (M.view.z < 15) M.view.z = 16; draw(); } else { M.wantLocate = true; msg('Looking for GPS… This can take a minute outdoors with no data.'); } };
++  $('map-zoom-in').onclick = () => glideZoom(M.w / 2, M.h / 2, 1); $('map-zoom-out').onclick = () => glideZoom(M.w / 2, M.h / 2, -1);
++  $('map-locate').onclick = () => { ensureGps(); if (M.gps) { M.follow = true; $('map-locate').classList.add('on'); flyTo(M.gps.x, M.gps.y, Math.max(M.view.z, 16)); if (M.nav) renderSheet(); } else { M.wantLocate = true; msg('Looking for GPS… This can take a minute outdoors with no data.'); } };
++  $('map-layer').onclick = () => setSat(!M.sat);
++  $('map-paste').onclick = async () => {
++    let t = ''; try { t = await navigator.clipboard.readText(); } catch { msg('Press and hold in the search box, then choose Paste.'); $('map-search').focus(); return; }
++    $('map-search').value = t; const loc = parseLocation(t); if (loc && !loc.short) goLocation(loc); else { search(t); if (!loc) msg('No location was found in what you copied.'); }
++  };
++  $('map-search').addEventListener('paste', () => setTimeout(() => { const loc = parseLocation($('map-search').value); if (loc && !loc.short) goLocation(loc); }, 0));
+@@ -512 +708 @@ export async function initMaps(root) {
+-  loadWorld();
++  loadWorld(); satInit(); let sat = false; try { sat = !!localStorage.getItem('mapSat'); } catch {} if (sat) setSat(true);
+@@ -515 +711 @@ export async function initMaps(root) {
+-M.api = { makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint };
++M.api = { parseLocation, setSat, SAT, makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint };
+diff --git a/internot-ai-v0.4/style.css b/internot-ai-v0.4/style.css
+index 280a8d7..fe473bd 100644
+--- a/internot-ai-v0.4/style.css
++++ b/internot-ai-v0.4/style.css
+@@ -143,0 +144,15 @@ a { color: var(--accent-deep); }
++
++/* map controls */
++.map-search input { padding-right: 82px; }
++#map-paste { position: absolute; right: 5px; top: 5px; height: calc(100% - 10px); max-height: 36px; padding: 0 14px; border-radius: 18px; font-size: 13px; }
++.map-search:has(ul:not([hidden])) #map-paste { height: 36px; }
++.map-btns button.txt { font-size: 13px; font-weight: 600; }
++.map-btns button.on { color: #2f6fde; }
++.sheet-sub { display: block; font-weight: 400; font-size: 12px; color: var(--muted); }
++.map-attrib { max-width: 72%; line-height: 1.25; }
++
++.map-sheet:not([hidden]) ~ .map-attrib { display: none; }
++.doc-thumb { width: 52px; height: 52px; object-fit: cover; border-radius: 8px; flex: none; border: 1px solid var(--line); background: #fff; }
++.doc-kind { width: 52px; height: 52px; border-radius: 8px; flex: none; display: grid; place-items: center; background: var(--panel2); color: var(--accent-deep); font: 600 12px system-ui, sans-serif; }
++.doc-info { flex: 1; min-width: 0; } .doc-info details { margin-top: 4px; } .doc-info summary { font-size: 13px; color: var(--accent-deep); cursor: pointer; }
++.doc-peek { white-space: pre-wrap; font-size: 13px; color: var(--muted); max-height: 220px; overflow-y: auto; margin: 6px 0 0; }
+diff --git a/internot-ai-v0.4/sw.js b/internot-ai-v0.4/sw.js
+index 010282b..48967eb 100644
+--- a/internot-ai-v0.4/sw.js
++++ b/internot-ai-v0.4/sw.js
+@@ -3 +3 @@
+-const VERSION = 'internot-v0.6.0';
++const VERSION = 'internot-v0.7.0';
+diff --git a/internot-ai-v0.4/tools-fetch-sat.mjs b/internot-ai-v0.4/tools-fetch-sat.mjs
+new file mode 100644
+index 0000000..c242fbb
+--- /dev/null
++++ b/internot-ai-v0.4/tools-fetch-sat.mjs
+@@ -0,0 +1,35 @@
++#!/usr/bin/env node
++// Downloads the satellite pictures that ship inside the app: the whole world from far out, and one
++// country closer in.   node tools-fetch-sat.mjs <out-folder> [name minLon minLat maxLon maxLat maxZoom]
++// Source: Sentinel-2 cloudless 2016 by EOX IT Services GmbH (CC BY 4.0), https://s2maps.eu
++import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
++const [, , out, name = 'Lesotho', a = '26.9', b = '-30.75', c = '29.6', d = '-28.5', maxZ = '12'] = process.argv;
++const box = [+a, +b, +c, +d], world = 4, max = +maxZ, TWO32 = 4294967296;
++const lonToX = (lon) => Math.min(TWO32 - 1, Math.max(0, Math.round((lon + 180) / 360 * TWO32)));
++const latToY = (lat) => { const s = Math.sin(lat * Math.PI / 180); return Math.min(TWO32 - 1, Math.max(0, Math.round((0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * TWO32))); };
++const url = (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2016_3857/default/g/${z}/${y}/${x}.jpg`;
++const jobs = [];
++for (let z = 0; z <= max; z++) {
++  const n = 2 ** z, t = (v) => Math.floor(v / TWO32 * n);
++  const [x0, x1, y0, y1] = z <= world ? [0, n - 1, 0, n - 1] : [t(lonToX(box[0])), t(lonToX(box[2])), t(latToY(box[3])), t(latToY(box[1]))];
++  for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) jobs.push([z, x, y]);
++}
++console.log(`${jobs.length} pictures to fetch`);
++let done = 0, failed = 0, bytes = 0;
++async function worker() {
++  for (let job; (job = jobs.pop());) {
++    const [z, x, y] = job; let ok = false;
++    for (let tries = 0; tries < 3 && !ok; tries++) {
++      try {
++        const r = await fetch(url(z, x, y)); if (!r.ok) throw new Error('HTTP ' + r.status);
++        const buf = Buffer.from(await r.arrayBuffer()); if (buf.length < 200) throw new Error('empty');
++        mkdirSync(`${out}/${z}/${x}`, { recursive: true }); writeFileSync(`${out}/${z}/${x}/${y}.jpg`, buf); bytes += buf.length; ok = true;
++      } catch (e) { if (tries === 2) { failed++; if (failed < 6) console.log(`failed ${z}/${x}/${y}: ${e.message}`); } else await new Promise((r) => setTimeout(r, 800)); }
++    }
++    if (++done % 200 === 0) console.log(`${done} done`);
++  }
++}
++await Promise.all(Array.from({ length: 6 }, worker));
++if (failed > done * 0.03) { rmSync(out, { recursive: true, force: true }); console.error(`too many failures (${failed}), nothing kept`); process.exit(1); }
++writeFileSync(`${out}/index.json`, JSON.stringify({ name, box, world, max, count: done - failed }));
++console.log(`${done - failed} pictures, ${(bytes / 1048576).toFixed(1)} MB`);
