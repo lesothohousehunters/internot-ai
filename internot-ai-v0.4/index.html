@@ -41,12 +41,12 @@
   <section id="view-map" class="view" aria-label="Maps">
     <div id="map-wrap">
       <canvas id="map-canvas"></canvas>
-      <div id="map-search-box" class="map-search"><input id="map-search" type="search" placeholder="Search towns, villages, clinics…" autocomplete="off"><ul id="map-results" hidden></ul></div>
+      <div id="map-search-box" class="map-search"><input id="map-search" type="search" placeholder="Search a place or paste a location" autocomplete="off"><button id="map-paste" type="button">Paste</button><ul id="map-results" hidden></ul></div>
       <div id="nav-banner" class="nav-banner" hidden><div id="nav-dist"></div><div id="nav-next"></div><small id="nav-left"></small></div>
-      <div class="map-btns"><button id="map-zoom-in" type="button" aria-label="Zoom in">+</button><button id="map-zoom-out" type="button" aria-label="Zoom out">−</button><button id="map-locate" type="button" aria-label="Show my location">◎</button></div>
+      <div class="map-btns"><button id="map-zoom-in" type="button" aria-label="Zoom in">+</button><button id="map-zoom-out" type="button" aria-label="Zoom out">−</button><button id="map-locate" type="button" aria-label="Show my location">◎</button><button id="map-layer" type="button" class="txt" aria-label="Show satellite pictures">Sat</button></div>
       <div id="map-msg" class="map-msg" hidden></div>
       <div id="map-sheet" class="map-sheet" hidden></div>
-      <div class="map-attrib">© OpenStreetMap contributors · Natural Earth</div>
+      <div id="map-attrib" class="map-attrib">© OpenStreetMap contributors · Natural Earth</div>
     </div>
   </section>
 
@@ -92,14 +92,15 @@
   <!-- DOCUMENTS -->
   <section id="view-docs" class="view" aria-label="Documents">
     <h2>Documents</h2>
-    <p class="hint">Add notes, memos or lesson material. With “Use my documents” switched on, The Brain finds the most relevant passages and answers from them. Text files only for now (.txt, .md, .csv).</p>
+    <p class="hint">Add notes, memos or lesson material. With “Use my documents” switched on, The Brain finds the most relevant passages and answers from them. Add almost any file: Word, PDF, Excel, PowerPoint, text, web pages, and photos or screenshots of printed text. Everything is read on this device.</p>
     <div class="card">
       <input id="doc-title" type="text" placeholder="Title (e.g. Grade 7 Science scheme)">
       <textarea id="doc-text" rows="6" placeholder="Paste text here…"></textarea>
       <div class="row wrap">
         <button id="doc-save" type="button" class="primary">Save document</button>
-        <label class="button">Add text file<input id="doc-file" type="file" accept=".txt,.md,.csv,text/plain" multiple hidden></label>
+        <label class="button">Add files or photos<input id="doc-file" type="file" multiple hidden></label>
       </div>
+      <p id="doc-status" class="hint" role="status"></p>
     </div>
     <ul id="doc-list" class="list"></ul>
   </section>

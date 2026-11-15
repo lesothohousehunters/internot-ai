@@ -11,6 +11,8 @@ const MB = 1024 * 1024;
 const MODEL_FILE = 'model.gguf';
 const MAX_MODEL_BYTES = 2000 * MB; // browser limit for a single model file
 const NATIVE = !!window.Capacitor;   // running inside the installed Android app
+// Android app: the native engine uses all the fast processor cores. The web engine is the fallback.
+const BRAIN = NATIVE ? window.capacitorExports?.registerPlugin?.('Brain') : null;
 
 /* ---------- loader: the logo with a blinking exclamation mark ---------- */
 let logoN = 2;
@@ -146,6 +148,12 @@ async function ensureLoaded() {
   if (state.loaded) return;
   if (state.loading) return state.loading;
   state.loading = (async () => {
+    if (state.native) {
+      if (!state.modelMeta) throw new Error('NO_MODEL');
+      setStatus('Waking The Brain…', 'busy');
+      const r = await BRAIN.load({ ctx: 2048 }); state.loadInfo = r; state.loaded = true;
+      setStatus('Ready · offline', 'ok'); renderModel(); return;
+    }
     const blob = state.sessionBlob || await getStoredModel();
     if (!blob) throw new Error('NO_MODEL');
     setStatus('Waking The Brain…', 'busy');
@@ -164,6 +172,7 @@ async function ensureLoaded() {
 }
 
 async function unloadModel() {
+  if (state.native) { if (state.loaded) { try { await BRAIN.unload(); } catch {} } state.loaded = false; setStatus(state.modelMeta ? 'Asleep · memory freed' : 'No model yet'); renderModel(); return; }
   if (!state.wllama) return;
   try { await state.wllama.exit(); } catch {}
   state.wllama = null; state.loaded = false;
@@ -201,9 +210,9 @@ function retrieve(query, k = 3) {
   }).filter((c) => c.score > 0).sort((a, b) => b.score - a.score);
   return scored.slice(0, k);
 }
-async function addDoc(title, text) {
+async function addDoc(title, text, extra = {}) {
   text = text.trim(); if (!text) return;
-  state.docs.push({ id: Date.now() + Math.random().toString(36).slice(2), title: title.trim() || 'Untitled', chars: text.length, chunks: chunkText(text) });
+  state.docs.push({ id: Date.now() + Math.random().toString(36).slice(2), title: title.trim() || 'Untitled', chars: text.length, chunks: chunkText(text), ...extra });
   await writeJSON('docs.json', state.docs); renderDocs();
 }
 
@@ -234,7 +243,15 @@ async function send(question) {
     state.messages.push(reply); const bubble = renderMessages();
     const think = document.createElement('span'); think.className = 'think'; think.innerHTML = logoSVG(22, true) + 'Thinking…'; bubble.append(think);
     const maxTotal = Number(state.settings.max); let used = 0;
-    for (;;) {
+    if (state.native) {   // one call; the answer streams in piece by piece
+      setStatus('Thinking…', 'busy'); const id = Math.random().toString(36).slice(2);
+      state.onPiece = (p) => { if (p.id !== id) return; reply.content += p.text; think.remove(); bubble.firstChild.textContent = reply.content; scrollDown(); };
+      state.abort.signal.addEventListener('abort', () => BRAIN.stop().catch(() => {}));
+      try { state.lastStats = await BRAIN.generate({ messages: msgs, maxTokens: maxTotal, temperature: state.settings.temp, id }); }
+      finally { state.onPiece = null; }
+      if (state.abort.signal.aborted) throw Object.assign(new Error('stopped'), { name: 'AbortError' });
+    }
+    else for (;;) {
       const block = state.settings.cool ? Math.min(COOL_BLOCK_TOKENS, maxTotal - used) : maxTotal;
       // After a cool-down pause the partial answer is sent back so the model continues it.
       const req = reply.content ? [...msgs, { role: 'assistant', content: reply.content }] : msgs;
@@ -299,9 +316,13 @@ function renderMessages() {
 function renderDocs() {
   const list = $('doc-list'); list.textContent = '';
   for (const d of state.docs) {
-    const li = document.createElement('li'); const info = document.createElement('div');
-    info.textContent = d.title; const sm = document.createElement('small');
+    const li = document.createElement('li'); const info = document.createElement('div'); info.className = 'doc-info';
+    if (d.thumb) { const im = document.createElement('img'); im.className = 'doc-thumb'; im.src = d.thumb; im.alt = ''; li.append(im); }
+    else { const ic = document.createElement('span'); ic.className = 'doc-kind'; ic.textContent = (d.kind || 'text').slice(0, 4).toUpperCase(); li.append(ic); }
+    info.append(document.createTextNode(d.title)); const sm = document.createElement('small');
     sm.textContent = `${d.chars.toLocaleString()} characters · ${d.chunks.length} passages`; info.append(sm);
+    const peek = document.createElement('details'); const su = document.createElement('summary'); su.textContent = 'Show text'; const pre = document.createElement('p'); pre.className = 'doc-peek';
+    peek.ontoggle = () => { if (peek.open && !pre.textContent) pre.textContent = d.chunks.slice(0, 4).join('\n…\n').slice(0, 2400); }; peek.append(su, pre); info.append(peek);
     const del = document.createElement('button'); del.className = 'danger'; del.textContent = 'Remove';
     del.onclick = async () => { state.docs = state.docs.filter((x) => x.id !== d.id); await writeJSON('docs.json', state.docs); renderDocs(); };
     li.append(info, del); list.append(li);
@@ -320,7 +341,7 @@ function renderDevice() {
   const rows = [
     ['Memory', navigator.deviceMemory ? `about ${navigator.deviceMemory} GB` : 'not reported by this browser'],
     ['Processor cores', String(navigator.hardwareConcurrency || '?')],
-    ['Fast mode (multi-thread)', self.crossOriginIsolated ? 'on' : NATIVE ? 'not available in this Android build' : 'off — reopen the app once to switch on'],
+    state.native ? ['AI engine', `native, ${state.native.threads} of ${state.native.cores} cores`] : ['AI engine', self.crossOriginIsolated ? 'web, several cores' : NATIVE ? 'web, one core (slower)' : 'web, one core — reopen the app once for more'],
     ['Offline storage', rootDir ? 'available' : 'not available (private tab?)'],
     ['Works offline', NATIVE || navigator.serviceWorker?.controller ? 'yes' : 'after next reopen'],
   ];
@@ -354,17 +375,31 @@ function wire() {
   $('composer').onsubmit = (e) => { e.preventDefault(); const q = input.value.trim(); if (!q || state.generating) return; input.value = ''; input.style.height = 'auto'; send(q); };
   $('stop').onclick = () => state.abort?.abort();
 
+  $('model-file').parentElement.addEventListener('click', async (e) => {   // native engine: the phone's own file picker copies the model in
+    if (!state.native) return; e.preventDefault();
+    try { setStatus('Copying model…', 'busy'); loader('Copying the model. This takes a minute.'); const m = await BRAIN.pickModel(); await unloadModel(); state.modelMeta = m; setStatus('Model saved', 'ok'); }
+    catch (err) { setStatus(err?.message === 'cancelled' ? 'Ready' : (err?.message || 'Could not copy the model'), err?.message === 'cancelled' ? '' : 'err'); }
+    loader(null); renderModel();
+  });
   $('model-file').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) await importModel(f); };
   $('model-download').onclick = () => { const u = $('model-url').value.trim(); if (u) downloadModel(u); };
   $('model-unload').onclick = unloadModel;
   $('model-delete').onclick = async () => {
     if (!confirm('Delete the model from this device?')) return;
-    await unloadModel(); try { await rootDir?.removeEntry(MODEL_FILE); await rootDir?.removeEntry('model.json'); } catch {}
+    await unloadModel(); if (state.native) { try { await BRAIN.deleteModel(); } catch {} } try { await rootDir?.removeEntry(MODEL_FILE); await rootDir?.removeEntry('model.json'); } catch {}
     state.modelMeta = null; state.sessionBlob = null; setStatus('No model yet'); renderModel();
   };
 
   $('doc-save').onclick = async () => { await addDoc($('doc-title').value, $('doc-text').value); $('doc-title').value = ''; $('doc-text').value = ''; };
-  $('doc-file').onchange = async (e) => { for (const f of e.target.files) await addDoc(f.name.replace(/\.[^.]+$/, ''), await f.text()); e.target.value = ''; };
+  $('doc-file').onchange = async (e) => {
+    const { readDoc, thumbOf } = await import('./docs-read.js'); const st = $('doc-status'); const notes = [];
+    for (const f of e.target.files) {
+      try { st.textContent = `Reading ${f.name}…`; const text = (await readDoc(f, (t) => { st.textContent = `${f.name}: ${t}`; })).slice(0, 600000);
+        if (text.replace(/\s/g, '').length < 12) notes.push(`${f.name}: no readable text was found.`); else { await addDoc(f.name.replace(/\.[^.]+$/, ''), text, { thumb: await thumbOf(f), kind: (f.name.match(/\.([a-z0-9]{1,5})$/i) || [, 'text'])[1].toLowerCase() }); notes.push(`${f.name}: added.`); } }
+      catch (err) { console.warn('document unreadable', err); notes.push(`${f.name}: ${err?.message || 'could not be read'}`); }
+    }
+    st.textContent = notes.join(' '); e.target.value = '';
+  };
 
   ['set-cool', 'set-unload', 'set-gpu', 'set-max', 'set-system', 'use-docs'].forEach((id) => $(id).onchange = saveSettings);
   $('clear-chat').onclick = async () => { if (!confirm('Clear the chat history on this device?')) return; state.messages = []; renderMessages(); await writeJSON('chat.json', []); };
@@ -393,8 +428,9 @@ async function registerSW() {
   state.settings = { ...DEFAULTS, ...(await readJSON('settings.json', {})) };
   state.messages = (await readJSON('chat.json', [])).filter((m) => m.role !== 'note');
   state.docs = await readJSON('docs.json', []);
-  const stored = await getStoredModel();
-  if (stored) state.modelMeta = (await readJSON('model.json', null)) || { name: MODEL_FILE, size: stored.size };
+  if (BRAIN) { try { const i = await BRAIN.info(); if (i.available) { state.native = i; state.modelMeta = i.model || null; BRAIN.addListener('progress', (p) => loader('Copying the model…', p.total > 0 ? p.done / p.total : undefined)); BRAIN.addListener('piece', (p) => state.onPiece?.(p)); } } catch (e) { console.warn('native engine unavailable', e); } }
+  if (!state.native) { const stored = await getStoredModel(); if (stored) state.modelMeta = (await readJSON('model.json', null)) || { name: MODEL_FILE, size: stored.size }; }
+  else { $('model-download').closest('details').hidden = true; try { await rootDir?.removeEntry(MODEL_FILE); } catch {} }   // a web-engine copy is no longer needed
   wire(); applySettingsToUI(); renderMessages(); renderDocs(); renderModel(); renderDevice();
   setStatus(state.modelMeta ? 'Waking The Brain…' : 'No model yet', state.modelMeta ? 'busy' : '');
   window.internot = state; // handy when debugging

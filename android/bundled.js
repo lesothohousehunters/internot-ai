@@ -1,6 +1,21 @@
 // Full Android app, first launch: unpack the AI model that ships inside the app into app storage.
 // Runs before the app starts; the app waits for window.internotSetup.
 window.internotSetup = (async () => {
+  // Native engine: the model is copied once from inside the app to the app's own storage.
+  const brain = window.Capacitor && window.capacitorExports?.registerPlugin?.('Brain');
+  if (brain) {
+    try {
+      const info = await brain.info();
+      if (info.available && info.bundled) {
+        if (info.model || localStorage.getItem('bundledNative')) return;
+        const text = document.getElementById('boot-text'), bar = document.getElementById('boot-bar'); document.getElementById('boot-progress').hidden = false;
+        text.textContent = 'Getting the AI model ready. One time only, no internet used.';
+        const h = await brain.addListener('progress', (p) => { if (p.total > 0) bar.style.width = Math.min(100, p.done / p.total * 100) + '%'; });
+        try { await brain.prepareBundled(); localStorage.setItem('bundledNative', '1'); } finally { h.remove?.(); document.getElementById('boot-progress').hidden = true; }
+        return;
+      }
+    } catch (e) { console.warn('native setup failed, using the web engine', e); }
+  }
   let list; try { const r = await fetch('./bundled/list.json'); if (!r.ok) return; list = await r.json(); } catch { return; }
   const root = await navigator.storage.getDirectory();
   const read = async (n) => { try { return JSON.parse(await (await (await root.getFileHandle(n)).getFile()).text()); } catch { return null; } };
