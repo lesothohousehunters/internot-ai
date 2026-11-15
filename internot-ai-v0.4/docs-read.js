@@ -143,9 +143,13 @@ async function pdf(file, say) {
 let ocrWorker = null, ocrSay = () => {}, ocrIdle = 0;
 async function ocrCanvas(canvas, say) {
   await loadScript(at('./lib/ocr/tesseract.min.js')); ocrSay = say; clearTimeout(ocrIdle);
-  ocrWorker ||= await window.Tesseract.createWorker('eng', 1, { workerPath: at('./lib/ocr/worker.min.js'), corePath: at('./lib/ocr/'), langPath: at('./lib/ocr/'), gzip: true, cacheMethod: 'none',
-    logger: (m) => { if (m.status === 'recognizing text') ocrSay(`Reading the picture… ${Math.round(m.progress * 100)}%`); } });
-  const { data } = await ocrWorker.recognize(canvas);
+  // The language file is stored unpacked: Android app packaging renames files ending in .gz.
+  let fail; const failed = new Promise((_, no) => { fail = no; });
+  const guard = (p, ms, why) => Promise.race([p, failed, new Promise((_, no) => setTimeout(() => no(new Error(why)), ms))]);
+  ocrWorker ||= await guard(window.Tesseract.createWorker('eng', 1, { workerPath: at('./lib/ocr/worker.min.js'), corePath: at('./lib/ocr/'), langPath: at('./lib/ocr/'), gzip: false, cacheMethod: 'none',
+    errorHandler: (e) => fail(new Error('The part of the app that reads pictures could not start (' + String(e?.message || e).slice(0, 80) + ').')),
+    logger: (m) => { if (m.status === 'recognizing text') ocrSay(`Reading the picture… ${Math.round(m.progress * 100)}%`); } }), 90000, 'Reading pictures took too long on this phone.');
+  let data; try { ({ data } = await guard(ocrWorker.recognize(canvas), 180000, 'Reading this picture took too long.')); } catch (e) { try { ocrWorker?.terminate(); } catch {} ocrWorker = null; throw e; }
   ocrIdle = setTimeout(() => { ocrWorker?.terminate(); ocrWorker = null; }, 60000);   // free the memory when not in use
   return tidy(data.text || '');
 }
