@@ -48,23 +48,41 @@ jobs:
             (cd /tmp/compat && npm pack @wllama/wllama-compat@3.13.0 && tar xzf wllama-wllama-compat-3.13.0.tgz)
             cp /tmp/compat/package/wasm/wllama.js /tmp/compat/package/wasm/wllama.wasm $A/lib/wllama/compat/
           fi
-          ls -la $A $A/maps $A/lib/wllama/compat
+          if [ ! -f $A/lib/pdfjs/pdf.min.js ] || [ ! -f $A/lib/ocr/eng.traineddata.gz ]; then bash android/fetch-libs.sh $A; fi
+          ls -la $A $A/maps $A/lib/wllama/compat $A/lib/pdfjs $A/lib/ocr
           test $(stat -c %s $A/maps/lesotho.imap) -lt 95000000
           git add -A
           git diff --cached --quiet || { git commit -m "Update app and built-in map data"; git push; }
+      - name: Satellite pictures (kept between builds)
+        uses: actions/cache@v4
+        with:
+          path: sat
+          key: sat-lesotho-z13-v1
+      - name: Fetch satellite pictures if not kept
+        run: |
+          if [ ! -f sat/index.json ]; then node internot-ai-v0.4/tools-fetch-sat.mjs sat Lesotho 26.9 -30.75 29.6 -28.5 13 || echo "satellite pictures not available; the app fetches them online instead"; fi
+          du -sh sat 2>/dev/null || true; cat sat/index.json 2>/dev/null || true
+      - name: llama.cpp source for the native AI engine
+        run: |
+          git clone --depth 1 --branch b12407 https://github.com/ggml-org/llama.cpp android/brain/llama.cpp
+          ls $ANDROID_HOME/ndk $ANDROID_HOME/cmake || true
       - name: Lite APK (app, world map and Lesotho map)
         run: |
           mkdir build && cd build
           npm init -y
           npm i @capacitor/core@8 @capacitor/cli@8 @capacitor/android@8 @capacitor-community/text-to-speech@8
           mkdir www && cp -r ../internot-ai-v0.4/. www/
-          rm -f www/sw.js www/README.md www/tools-build-map.mjs www/tools-build-world.mjs
+          rm -f www/sw.js www/README.md www/tools-build-map.mjs www/tools-build-world.mjs www/tools-fetch-sat.mjs
+          if [ -f ../sat/index.json ]; then cp -r ../sat www/sat; fi
           cp node_modules/@capacitor/core/dist/capacitor.js www/
           sed -i 's#<script src="lib/qrcode.js"></script>#<script src="capacitor.js"></script><script src="lib/qrcode.js"></script>#' www/index.html
           grep -c capacitor.js www/index.html
           npx cap init "Internot AI" org.internot.app --web-dir www
           npx cap add android
-          cp ../android/MainActivity.java ../android/NearbyPlugin.java android/app/src/main/java/org/internot/app/
+          cp ../android/MainActivity.java ../android/NearbyPlugin.java ../android/BrainPlugin.java android/app/src/main/java/org/internot/app/
+          NDKV=$(ls $ANDROID_HOME/ndk | sort -V | tail -1); CMV=$(ls $ANDROID_HOME/cmake | sort -V | tail -1); echo "NDK $NDKV CMake $CMV"
+          sed -i "s#^android {#android {\n    ndkVersion \"$NDKV\"\n    externalNativeBuild { cmake { path \"../../../android/brain/CMakeLists.txt\"; version \"$CMV\" } }\n    defaultConfig { ndk { abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64' }; externalNativeBuild { cmake { arguments '-DANDROID_STL=c++_static', '-DCMAKE_BUILD_TYPE=Release'; cppFlags '-O3' } } }\n    packagingOptions { jniLibs { useLegacyPackaging true } }#" android/app/build.gradle
+          head -20 android/app/build.gradle
           sed -i 's#^dependencies {#dependencies {\n    implementation "com.google.android.gms:play-services-nearby:19.3.0"#' android/app/build.gradle
           M=android/app/src/main/AndroidManifest.xml
           P='<uses-permission android:name="android.permission.'
@@ -92,6 +110,7 @@ jobs:
         run: |
           cd build
           cp ../android/selftest.js www/
+          bash ../android/make-testdocs.sh www/testdocs
           sed -i 's#</body>#<script src="selftest.js"></script></body>#' www/index.html
           npx cap sync android
           (cd android && ./gradlew assembleDebug --no-daemon)
@@ -104,7 +123,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - name: Run the app on an Android emulator
         continue-on-error: true
-        timeout-minutes: 35
+        timeout-minutes: 45
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -123,4 +142,5 @@ jobs:
           ls -la *.apk
           gh release delete latest -y --cleanup-tag || true
           mkdir -p test-out && echo "built $(date -u)" > test-out/built.txt
-          gh release create latest internot-ai-full.apk internot-ai.apk test-out/* --title "Internot AI for Android" --notes "internot-ai-full.apk: everything inside (AI model, world map, Lesotho street map). Install and use with no internet. internot-ai.apk: the same without the AI model. The other files are the automatic test report and screenshots from an Android emulator."
+          ls -la test-out
+          gh release create latest internot-ai-full.apk internot-ai.apk test-out/* --title "Internot AI for Android" --notes "internot-ai-full.apk: everything inside (AI model, world map, Lesotho street and satellite maps). Install and use with no internet. internot-ai.apk: the same without the AI model. The other files are the automatic test report and screenshots from an Android emulator."
