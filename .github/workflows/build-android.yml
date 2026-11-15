@@ -48,7 +48,8 @@ jobs:
             (cd /tmp/compat && npm pack @wllama/wllama-compat@3.13.0 && tar xzf wllama-wllama-compat-3.13.0.tgz)
             cp /tmp/compat/package/wasm/wllama.js /tmp/compat/package/wasm/wllama.wasm $A/lib/wllama/compat/
           fi
-          if [ ! -f $A/lib/pdfjs/pdf.min.js ] || [ ! -f $A/lib/ocr/eng.traineddata.gz ]; then bash android/fetch-libs.sh $A; fi
+          if [ -f $A/lib/ocr/eng.traineddata.gz ]; then gunzip -c $A/lib/ocr/eng.traineddata.gz > $A/lib/ocr/eng.traineddata && rm $A/lib/ocr/eng.traineddata.gz; fi
+          if [ ! -f $A/lib/pdfjs/pdf.min.js ] || [ ! -f $A/lib/ocr/eng.traineddata ]; then bash android/fetch-libs.sh $A; fi
           ls -la $A $A/maps $A/lib/wllama/compat $A/lib/pdfjs $A/lib/ocr
           test $(stat -c %s $A/maps/lesotho.imap) -lt 95000000
           git add -A
