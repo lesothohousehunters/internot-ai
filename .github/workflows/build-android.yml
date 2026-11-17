@@ -63,7 +63,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: country-maps
-          key: country-maps-za-bw-v1
+          key: country-maps-za-bw-v2
       - name: Build the South Africa and Botswana maps if not kept
         run: |
           A=internot-ai-v0.4; mkdir -p country-maps
@@ -74,8 +74,10 @@ jobs:
           fi
           if [ ! -f country-maps/south-africa.imap ]; then
             curl -fL -o /tmp/za.pbf https://download.geofabrik.de/africa/south-africa-latest.osm.pbf && ls -la /tmp/za.pbf
-            node --max-old-space-size=12000 $A/tools-build-map.mjs /tmp/za.pbf country-maps/south-africa.imap "South Africa" --skip service,track --simplify 2
-            rm -f /tmp/za.pbf
+            curl -fL -o /tmp/ls.pbf https://download.geofabrik.de/africa/lesotho-latest.osm.pbf
+            sudo apt-get install -y -qq osmium-tool > /dev/null && osmium merge /tmp/za.pbf /tmp/ls.pbf -o /tmp/zals.pbf && ls -la /tmp/zals.pbf
+            node --max-old-space-size=12000 $A/tools-build-map.mjs /tmp/zals.pbf country-maps/south-africa.imap "South Africa" --skip service,track --simplify 2
+            rm -f /tmp/za.pbf /tmp/ls.pbf /tmp/zals.pbf
           fi
           ls -la country-maps; df -h / | tail -1
       - name: Satellite pictures (kept between builds)
