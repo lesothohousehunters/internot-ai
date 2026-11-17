@@ -13,6 +13,10 @@ jobs:
   apk:
     runs-on: ubuntu-latest
     steps:
+      - name: Free disk space (the AI model and country maps are large)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL /usr/local/lib/node_modules/@angular || true
+          df -h / | tail -1
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
@@ -37,11 +41,11 @@ jobs:
             curl -fL -o /tmp/p.json $N/ne_50m_populated_places_simple.geojson
             node $A/tools-build-world.mjs /tmp/c.json /tmp/p.json $A/world.json
           fi
-          if [ ! -f $A/maps/lesotho.imap ]; then
+          if [ ! -f $A/maps/lesotho.imap ] || ! head -c 400 $A/maps/lesotho.imap | grep -q '"B":'; then
             mkdir -p $A/maps
             curl -fL -o /tmp/l.pbf https://download.geofabrik.de/africa/lesotho-latest.osm.pbf
             ls -la /tmp/l.pbf
-            node $A/tools-build-map.mjs /tmp/l.pbf $A/maps/lesotho.imap Lesotho
+            node --max-old-space-size=12000 $A/tools-build-map.mjs /tmp/l.pbf $A/maps/lesotho.imap Lesotho --buildings
           fi
           if [ ! -f $A/lib/wllama/compat/wllama.wasm ]; then
             mkdir -p $A/lib/wllama/compat /tmp/compat
@@ -51,9 +55,29 @@ jobs:
           if [ -f $A/lib/ocr/eng.traineddata.gz ]; then gunzip -c $A/lib/ocr/eng.traineddata.gz > $A/lib/ocr/eng.traineddata && rm $A/lib/ocr/eng.traineddata.gz; fi
           if [ ! -f $A/lib/pdfjs/pdf.min.js ] || [ ! -f $A/lib/ocr/eng.traineddata ]; then bash android/fetch-libs.sh $A; fi
           ls -la $A $A/maps $A/lib/wllama/compat $A/lib/pdfjs $A/lib/ocr
-          test $(stat -c %s $A/maps/lesotho.imap) -lt 95000000
+          if [ $(stat -c %s $A/maps/lesotho.imap) -ge 95000000 ] && [ -f /tmp/l.pbf ]; then node --max-old-space-size=12000 $A/tools-build-map.mjs /tmp/l.pbf $A/maps/lesotho.imap Lesotho --buildings --house-simplify 1.5; fi
+          ls -la $A/maps; test $(stat -c %s $A/maps/lesotho.imap) -lt 95000000
           git add -A
           git diff --cached --quiet || { git commit -m "Update app and built-in map data"; git push; }
+      - name: South Africa and Botswana maps (kept between builds)
+        uses: actions/cache@v4
+        with:
+          path: country-maps
+          key: country-maps-za-bw-v1
+      - name: Build the South Africa and Botswana maps if not kept
+        run: |
+          A=internot-ai-v0.4; mkdir -p country-maps
+          if [ ! -f country-maps/botswana.imap ]; then
+            curl -fL -o /tmp/bw.pbf https://download.geofabrik.de/africa/botswana-latest.osm.pbf && ls -la /tmp/bw.pbf
+            node --max-old-space-size=12000 $A/tools-build-map.mjs /tmp/bw.pbf country-maps/botswana.imap Botswana --buildings --skip service --simplify 2
+            rm -f /tmp/bw.pbf
+          fi
+          if [ ! -f country-maps/south-africa.imap ]; then
+            curl -fL -o /tmp/za.pbf https://download.geofabrik.de/africa/south-africa-latest.osm.pbf && ls -la /tmp/za.pbf
+            node --max-old-space-size=12000 $A/tools-build-map.mjs /tmp/za.pbf country-maps/south-africa.imap "South Africa" --skip service,track --simplify 2
+            rm -f /tmp/za.pbf
+          fi
+          ls -la country-maps; df -h / | tail -1
       - name: Satellite pictures (kept between builds)
         uses: actions/cache@v4
         with:
@@ -98,11 +122,13 @@ jobs:
       - name: Full APK (AI model inside as well)
         run: |
           cd build && mkdir www/bundled
-          curl -fL -o www/bundled/model.gguf https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf
+          curl -fL -o www/bundled/model.gguf https://huggingface.co/bartowski/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf
+          cp ../country-maps/*.imap www/maps/
+          node -e "const fs=require('fs');const L=[['lesotho.imap','Lesotho'],['south-africa.imap','South Africa'],['botswana.imap','Botswana']].filter(([f])=>fs.existsSync('www/maps/'+f)).map(([f,n])=>{const b=fs.readFileSync('www/maps/'+f);const h=JSON.parse(b.subarray(12,12+b.readUInt32LE(8)).toString());return {file:f,name:n,bbox:h.bbox,houses:h.B||0,mb:Math.round(b.length/1048576)};});fs.writeFileSync('www/maps/list.json',JSON.stringify(L));console.log(L)"
           cp ../android/bundled.js www/
           sed -i 's#<script type="module" src="app.js"></script>#<script src="bundled.js"></script><script type="module" src="app.js"></script>#' www/index.html
           grep -c bundled.js www/index.html
-          node -e "const fs=require('fs');fs.writeFileSync('www/bundled/list.json',JSON.stringify([{label:'AI model',file:'model.gguf',to:'model.gguf',size:fs.statSync('www/bundled/model.gguf').size,meta:'model.json',name:'Qwen2.5 0.5B (built in)'}]))"
+          node -e "const fs=require('fs');fs.writeFileSync('www/bundled/list.json',JSON.stringify([{label:'AI model',file:'model.gguf',to:'model.gguf',size:fs.statSync('www/bundled/model.gguf').size,meta:'model.json',name:'Qwen2.5 1.5B (built in)'}]))"
           cat www/bundled/list.json
           npx cap sync android
           (cd android && ./gradlew assembleDebug --no-daemon)
@@ -124,14 +150,14 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - name: Run the app on an Android emulator
         continue-on-error: true
-        timeout-minutes: 45
+        timeout-minutes: 55
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
           arch: x86_64
           target: google_apis
           ram-size: 4096M
-          disk-size: 8G
+          disk-size: 10G
           cores: 3
           disable-animations: true
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
@@ -144,4 +170,4 @@ jobs:
           gh release delete latest -y --cleanup-tag || true
           mkdir -p test-out && echo "built $(date -u)" > test-out/built.txt
           ls -la test-out
-          gh release create latest internot-ai-full.apk internot-ai.apk test-out/* --title "Internot AI for Android" --notes "internot-ai-full.apk: everything inside (AI model, world map, Lesotho street and satellite maps). Install and use with no internet. internot-ai.apk: the same without the AI model. The other files are the automatic test report and screenshots from an Android emulator."
+          gh release create latest internot-ai-full.apk internot-ai.apk test-out/* --title "Internot AI for Android" --notes "internot-ai-full.apk: everything inside (AI model Qwen2.5 1.5B, world map, Lesotho street, house and satellite maps, South Africa and Botswana street maps). Install and use with no internet. internot-ai.apk: the same without the AI model. The other files are the automatic test report and screenshots from an Android emulator."
