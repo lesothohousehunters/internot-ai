@@ -43,7 +43,7 @@
       <canvas id="map-canvas"></canvas>
       <div id="map-search-box" class="map-search"><input id="map-search" type="search" placeholder="Search a place or paste a location" autocomplete="off"><button id="map-paste" type="button">Paste</button><ul id="map-results" hidden></ul></div>
       <div id="nav-banner" class="nav-banner" hidden><div id="nav-dist"></div><div id="nav-next"></div><small id="nav-left"></small></div>
-      <div class="map-btns"><button id="map-zoom-in" type="button" aria-label="Zoom in">+</button><button id="map-zoom-out" type="button" aria-label="Zoom out">−</button><button id="map-locate" type="button" aria-label="Show my location">◎</button><button id="map-layer" type="button" class="txt" aria-label="Show satellite pictures">Sat</button></div>
+      <div class="map-btns"><button id="map-zoom-in" type="button" aria-label="Zoom in">+</button><button id="map-zoom-out" type="button" aria-label="Zoom out">−</button><button id="map-locate" type="button" aria-label="Show my location">◎</button><button id="map-layer" type="button" class="txt" aria-label="Show satellite pictures">Sat</button><button id="map-north" type="button" aria-label="Turn the map back to north" hidden><span>⬆</span></button></div>
       <div id="map-msg" class="map-msg" hidden></div>
       <div id="map-sheet" class="map-sheet" hidden></div>
       <div id="map-attrib" class="map-attrib">© OpenStreetMap contributors · Natural Earth</div>
@@ -122,7 +122,7 @@
     <details class="card">
       <summary>Download a model once over Wi‑Fi</summary>
       <p class="hint">Only needed if you do not already have a model file. This is the one step that uses the internet.</p>
-      <input id="model-url" type="url" inputmode="url" value="https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf">
+      <input id="model-url" type="url" inputmode="url" value="https://huggingface.co/bartowski/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf">
       <div class="row wrap"><button id="model-download" type="button">Download</button></div>
     </details>
 
@@ -143,6 +143,7 @@
 
     <h2>Maps</h2>
     <div class="card"><div id="map-info" class="model-info">World map only.</div>
+      <div id="map-choose-row" class="row wrap" hidden><label for="map-choose">Built-in map</label><select id="map-choose"></select></div>
       <p class="hint">The world map is always here. A country map adds every street, village and clinic, and turn-by-turn directions.</p>
       <div class="row wrap"><button id="map-get" type="button" class="primary" hidden>Get the Lesotho street map</button>
         <label class="button">Add a country map file<input id="map-file" type="file" accept=".pbf,.imap,application/octet-stream" hidden></label></div>

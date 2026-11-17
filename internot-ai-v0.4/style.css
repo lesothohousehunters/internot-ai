@@ -148,6 +148,8 @@ a { color: var(--accent-deep); }
 .map-search:has(ul:not([hidden])) #map-paste { height: 36px; }
 .map-btns button.txt { font-size: 13px; font-weight: 600; }
 .map-btns button.on { color: #2f6fde; }
+.map-btns button[hidden] { display: none; }
+#map-north span { display: inline-block; color: #c15f3c; }
 .sheet-sub { display: block; font-weight: 400; font-size: 12px; color: var(--muted); }
 .map-attrib { max-width: 72%; line-height: 1.25; }
 

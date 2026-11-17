@@ -1,0 +1,11 @@
+{
+  "name": "internot-server",
+  "version": "1.0.0",
+  "description": "Internot AI server: anonymous device counts, adverts and update notices. Runs on Render with a Neon Postgres database.",
+  "type": "module",
+  "main": "server.js",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "pg": "^8.13.1" },
+  "license": "MIT"
+}

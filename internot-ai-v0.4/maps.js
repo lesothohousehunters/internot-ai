@@ -13,7 +13,7 @@ const PLACE_MINZ = [0, 7, 10.5, 12.5, 12.5, 13.5, 14, 14, 14, 14.5, 15, 15, 15, 
 const PLACE_RANK = [0, 1, 2, 4, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13];
 
 const M = {
-  root: null, map: null, mem: null, view: { cx: 0, cy: 0, z: 10 }, w: 0, h: 0,
+  root: null, map: null, mem: null, view: { cx: 0, cy: 0, z: 10, rot: 0 }, w: 0, h: 0,
   gps: null, watch: null, follow: false, start: null, dest: null, pick: null, route: null, nav: null,
   mute: false, raf: 0, spoken: [], wake: null, world: null,
 };
@@ -22,10 +22,12 @@ window.internotMap = M;
 /* ---------- geometry ---------- */
 const mPerUnit = (y) => EARTH / TWO32 / Math.cosh(Math.PI * (1 - 2 * y / TWO32));
 const upp = () => TWO32 / (256 * 2 ** M.view.z);                 // map units per screen pixel
-const toSX = (x) => (x - M.view.cx) / upp() + M.w / 2;
-const toSY = (y) => (y - M.view.cy) / upp() + M.h / 2;
+// The map can be turned with two fingers: M.view.rot is the angle (radians) the map is turned on the screen.
+const turn = (dx, dy, a) => { const c = Math.cos(a), s = Math.sin(a); return [dx * c - dy * s, dx * s + dy * c]; };
+const toS = (x, y) => { const [a, b] = turn((x - M.view.cx) / upp(), (y - M.view.cy) / upp(), M.view.rot); return [a + M.w / 2, b + M.h / 2]; };
 const xToLon = (x) => x / TWO32 * 360 - 180, yToLat = (y) => Math.atan(Math.sinh(Math.PI * (1 - 2 * y / TWO32))) * 180 / Math.PI;
-const fromS = (sx, sy) => ({ x: M.view.cx + (sx - M.w / 2) * upp(), y: M.view.cy + (sy - M.h / 2) * upp() });
+const fromS = (sx, sy) => { const [a, b] = turn(sx - M.w / 2, sy - M.h / 2, -M.view.rot); return { x: M.view.cx + a * upp(), y: M.view.cy + b * upp() }; };
+const panBy = (dx, dy) => { const [a, b] = turn(dx, dy, -M.view.rot); M.view.cx -= a * upp(); M.view.cy -= b * upp(); };   // move the map with a finger
 function metres(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by) * mPerUnit((ay + by) / 2); }
 const nodeDist = (a, b) => { const m = M.map; return metres(m.X[a], m.Y[a], m.X[b], m.Y[b]); };
 const bearing = (ax, ay, bx, by) => Math.atan2(bx - ax, -(by - ay)) * 180 / Math.PI;
@@ -102,28 +104,48 @@ function setProgress(frac, label) {
   if (frac != null) { $('map-progress-bar').style.width = Math.round(frac * 100) + '%'; $('map-progress-label').textContent = label || ''; }
   window.internotLoader?.(frac == null ? null : (label || 'Preparing map') + '…', frac ?? undefined);
 }
-// A ready-made country map that ships with the app (inside the Android app, or beside the web app).
-const BUILT_IN = './maps/lesotho.imap';
+// Ready-made country maps that ship with the app (inside the Android app, or beside the web app).
+// maps/list.json names them; without it there is only Lesotho.
+let BUILT_INS = [{ file: 'lesotho.imap', name: 'Lesotho' }];
+const builtInList = fetch('./maps/list.json').then((r) => (r.ok ? r.json() : null)).then((l) => { if (Array.isArray(l) && l.length) BUILT_INS = l; }, () => {});
+const chosen = () => { let f = null; try { f = localStorage.getItem('builtInMap'); } catch {} return BUILT_INS.find((b) => b.file === f) || BUILT_INS[0]; };
+const builtInUrl = (b = chosen()) => './maps/' + b.file;
 const NATIVE = !!window.Capacitor;
 const TTS = NATIVE ? window.capacitorExports?.registerPlugin?.('TextToSpeech') : null;
 let builtIn = null;
-function builtInAvailable() { return builtIn ||= fetch(BUILT_IN, { method: 'HEAD' }).then((r) => r.ok && !/html/.test(r.headers.get('content-type') || ''), () => false); }
-async function useBuiltIn() {   // Android app: the file is already on the phone, so read it in place
-  try { const r = await fetch(BUILT_IN); if (!r.ok) return false; const buf = await r.arrayBuffer(); decodeImap(buf); M.mem = buf; return await loadStored(); } catch (e) { console.warn('built-in map unreadable', e); M.mem = null; return false; }
+function builtInAvailable() { return builtIn ||= fetch(builtInUrl(BUILT_INS[0]), { method: 'HEAD' }).then((r) => r.ok && !/html/.test(r.headers.get('content-type') || ''), () => false); }
+async function useBuiltIn(b = chosen()) {   // Android app: the file is already on the phone, so read it in place
+  try {
+    const r = await fetch(builtInUrl(b)); if (!r.ok) return false; const buf = await r.arrayBuffer(); decodeImap(buf);
+    M.mem = null; M.map = null; RT.cache.clear(); RT.map = null; M.mem = buf; M.builtIn = b.file; return await loadStored();
+  } catch (e) { console.warn('built-in map unreadable', e); M.mem = null; return false; }
+}
+// The built-in map that covers these points (the one in use first), for searching and directions across borders.
+function builtInFor(...pts) {
+  if (!NATIVE || BUILT_INS.length < 2) return null;
+  const inside = (b) => b.bbox && pts.every((p) => p.x >= b.bbox[0] && p.x <= b.bbox[2] && p.y >= b.bbox[1] && p.y <= b.bbox[3]);
+  const cur = BUILT_INS.find((b) => b.file === M.builtIn); if (cur && inside(cur)) return null;
+  return BUILT_INS.find(inside) || null;
+}
+async function switchBuiltIn(b) {
+  if (!b || b.file === M.builtIn) return false; try { localStorage.setItem('builtInMap', b.file); localStorage.removeItem('noBuiltInMap'); } catch {}
+  const v = { ...M.view }; setProgress(0.5, 'Opening the ' + b.name + ' map'); endNav(); clearRoute();
+  const ok = await useBuiltIn(b); setProgress(null);
+  if (ok) { M.needFit = false; Object.assign(M.view, v); renderMapInfo(); draw(); } return ok;
 }
 async function getBuiltIn() {   // web app: one download, then kept on the device
   $('map-error').textContent = '';
   try {
-    const r = await fetch(BUILT_IN); if (!r.ok || !r.body) throw new Error('The map could not be downloaded. Check the connection and try again.');
+    const r = await fetch(builtInUrl(BUILT_INS[0])); if (!r.ok || !r.body) throw new Error('The map could not be downloaded. Check the connection and try again.');
     const total = Number(r.headers.get('content-length')) || 0; const rd = r.body.getReader(); const parts = []; let n = 0;
     for (;;) { const { value, done } = await rd.read(); if (done) break; parts.push(value); n += value.byteLength; setProgress(total ? n / total * 0.9 : 0.5, 'Downloading map'); }
-    await importMap(new File(parts, 'lesotho.imap'));
+    await importMap(new File(parts, BUILT_INS[0].file));
   } catch (e) { setProgress(null); $('map-error').textContent = e?.message || 'The map could not be downloaded.'; }
 }
 const niceName = (file) => { const b = file.replace(/\.(osm\.pbf|pbf|imap)$/i, '').replace(/-latest$|-\d{6}$/, '').replace(/[-_]+/g, ' ').trim(); return b ? b[0].toUpperCase() + b.slice(1) : 'Map'; };
 
 async function importMap(file) {
-  $('map-error').textContent = '';
+  $('map-error').textContent = ''; try { localStorage.removeItem('builtInMap'); } catch {} M.builtIn = null;
   try {
     let buf; const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
     if (head[0] === 73 && head[1] === 77 && head[2] === 65 && head[3] === 80) { setProgress(0.5, 'Copying map'); buf = await file.arrayBuffer(); }
@@ -158,6 +180,10 @@ function renderMapInfo() {
   el.textContent = real ? `${M.map.name} · ${M.map.W.toLocaleString()} roads · ${M.map.placeList.length.toLocaleString()} places · map data from ${M.map.built}` : 'World map only. Add a country map below for streets, villages and directions.';
   $('map-delete').hidden = !real; $('map-replace').hidden = true;
   builtInAvailable().then((ok) => { $('map-get').hidden = real || !ok; });
+  const sel = $('map-choose'); if (!sel) return;
+  $('map-choose-row').hidden = !NATIVE || BUILT_INS.length < 2;
+  sel.textContent = ''; for (const b of BUILT_INS) { const o = document.createElement('option'); o.value = b.file; o.textContent = b.name; sel.append(o); }
+  sel.value = M.builtIn || '';
 }
 
 /* ---------- drawing ---------- */
@@ -173,9 +199,10 @@ function draw() { if (!M.raf) M.raf = requestAnimationFrame(() => { M.raf = 0; p
 /* ---------- satellite pictures ---------- */
 // Built in: the whole world from far out, and Lesotho closer in. Anything else is fetched when there is
 // internet and kept on the phone, so places you have looked at once stay visible offline.
-const SAT = { tiles: new Map(), local: null, remoteMax: 14, url: (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/${SAT.local?.layer || 's2cloudless_3857'}/default/g/${z}/${y}/${x}.jpg` };
-const satCredit = () => `Sentinel-2 cloudless – s2maps.eu by EOX IT Services GmbH (contains modified Copernicus Sentinel data ${SAT.local?.year || '2016'})`;
-async function satInit() { try { const r = await fetch('./sat/index.json'); if (r.ok) { SAT.local = await r.json(); if (M.sat) draw(); } } catch {} }
+// Only the 2016 pictures are used: EOX lets anyone use them, also commercially, with this credit (later years are non-commercial only).
+const SAT = { tiles: new Map(), local: null, remoteMax: 14, url: (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless_3857/default/g/${z}/${y}/${x}.jpg` };
+const satCredit = () => 'Sentinel-2 cloudless - https://s2maps.eu by EOX IT Services GmbH (Contains modified Copernicus Sentinel data 2016 & 2017)';
+async function satInit() { try { const r = await fetch('./sat/index.json'); if (r.ok) { const L = await r.json(); if (String(L.year) === '2016') { SAT.local = L; if (M.sat) draw(); } } } catch {} }
 function satLocal(z, x, y) {
   const L = SAT.local; if (!L) return false; if (z <= L.world) return true; if (z > L.max) return false; const n = 2 ** z, t = (v) => Math.floor(v / TWO32 * n);
   return x >= t(lonToX(L.box[0])) && x <= t(lonToX(L.box[2])) && y >= t(latToY(L.box[3])) && y <= t(latToY(L.box[1]));
@@ -244,8 +271,9 @@ export function parseLocation(text) {
   m = /(?:^|[^\d.\-])(-?\d{1,2}\.\d{3,})\s*[,;\s]\s*(-?\d{1,3}\.\d{3,})(?![\d.])/.exec(t); if (m) return ok(+m[1], +m[2]);
   return null;
 }
-function goLocation(loc) {
+async function goLocation(loc) {
   const x = lonToX(loc.lon), y = latToY(loc.lat); M.follow = false; $('map-results').hidden = true; $('map-search').blur();
+  await switchBuiltIn(builtInFor({ x, y }));
   flyTo(x, y, Math.max(M.view.z, 15)); pickAt(x, y, 'Pasted location');
 }
 async function copyText(text) {
@@ -256,7 +284,8 @@ async function copyText(text) {
 /* ---------- roads: drawn once into small square pictures (tiles), then reused while you move ---------- */
 // Re-drawing every road on every frame is too slow on low-cost phones; placing ready pictures is fast.
 const TILE = 256;
-const RT = { cache: new Map(), map: null, res: Math.min(1.5, window.devicePixelRatio || 1), max: 72 };
+const RT = { cache: new Map(), map: null, res: Math.min(2, window.devicePixelRatio || 1), max: 64 };
+const HOUSE_MINZ = 15;   // house outlines appear from this zoom
 function wayGrid(map) {
   const G = 128, [bx0, by0, bx1, by1] = map.bbox, cw = Math.max(1, (bx1 - bx0 + 1) / G), ch = Math.max(1, (by1 - by0 + 1) / G), { box, W } = map;
   const span = (w) => [Math.max(0, Math.min(G - 1, Math.floor((box[w * 4] - bx0) / cw))), Math.max(0, Math.min(G - 1, Math.floor((box[w * 4 + 2] - bx0) / cw))), Math.max(0, Math.min(G - 1, Math.floor((box[w * 4 + 1] - by0) / ch))), Math.max(0, Math.min(G - 1, Math.floor((box[w * 4 + 3] - by0) / ch)))];
@@ -292,6 +321,7 @@ function renderTile(Z, tx, ty, sat) {
     }
   });
   const k = Math.min(2.4, Math.max(0.28, 0.28 + (Z - 8) * 0.16)) * (sat ? 0.7 : 1), edge = k < 0.6 ? 0.9 : 1.6;
+  if (map.houses && Z >= HOUSE_MINZ) paintHouses(g, map, X0, Y0, tu, span, sat);
   g.lineCap = 'round'; g.lineJoin = 'round';
   if (paths[9]) { g.strokeStyle = '#9fc4e4'; g.lineWidth = 2.2 * k; g.stroke(paths[9]); }
   for (let cls = 7; cls >= 0; cls--) {          // casings first, so junctions join cleanly
@@ -303,10 +333,24 @@ function renderTile(Z, tx, ty, sat) {
   }
   return cv;
 }
+function paintHouses(g, map, X0, Y0, tu, span, sat) {   // every house and building, from the map file
+  const h = map.houses, [bx0, by0, bx1, by1] = map.bbox, G = h.G, Q = h.Q, cw = Math.max(1, (bx1 - bx0 + 1) / G), ch = Math.max(1, (by1 - by0 + 1) / G), m = 400 * Q;
+  const a = Math.max(0, Math.floor((X0 - m - bx0) / cw)), b = Math.min(G - 1, Math.floor((X0 + span + m - bx0) / cw)), c = Math.max(0, Math.floor((Y0 - m - by0) / ch)), d = Math.min(G - 1, Math.floor((Y0 + span + m - by0) / ch));
+  if (a > b || c > d) return; const p = new Path2D(); let any = false;
+  for (let cy = c; cy <= d; cy++) for (let i = h.cell[cy * G + a]; i < h.cell[cy * G + b + 1]; i++) {
+    let x = h.ox[i], y = h.oy[i]; if (x < X0 - m || x > X0 + span + m || y < Y0 - m || y > Y0 + span + m) continue;
+    p.moveTo((x - X0) / tu, (y - Y0) / tu);
+    for (let k = h.start[i]; k < h.start[i + 1]; k++) { x += h.steps[k * 2] * Q; y += h.steps[k * 2 + 1] * Q; p.lineTo((x - X0) / tu, (y - Y0) / tu); }
+    p.closePath(); any = true;
+  }
+  if (!any) return;
+  g.fillStyle = sat ? 'rgba(255,255,255,.14)' : '#e2d8c8'; g.fill(p);
+  g.strokeStyle = sat ? 'rgba(255,240,200,.85)' : '#c3b49d'; g.lineWidth = 0.8; g.stroke(p);
+}
 function paintRoads(ctx, u, z, x0, y0, x1, y1, sat) {
   const map = M.map; if (!map.W) return;
   if (RT.map !== map) { RT.cache.clear(); RT.map = map; wayGrid(map); }
-  const Z = Math.max(0, Math.min(18, Math.round(z))), span = TWO32 / 2 ** Z, px = span / u, [bx0, by0, bx1, by1] = map.bbox;
+  const Z = Math.max(0, Math.min(20, Math.round(z))), span = TWO32 / 2 ** Z, px = span / u, [bx0, by0, bx1, by1] = map.bbox;
   const ax = Math.floor(Math.max(x0, bx0) / span), bx = Math.floor(Math.min(x1, bx1) / span), ay = Math.floor(Math.max(y0, by0) / span), by = Math.floor(Math.min(y1, by1) / span);
   if (ax > bx || ay > by) return;
   const ox = M.w / 2 - M.view.cx / u, oy = M.h / 2 - M.view.cy / u, S = sat ? 1 : 0, t0 = performance.now(), cx = M.view.cx / span, cy = M.view.cy / span;
@@ -319,7 +363,8 @@ function paintRoads(ctx, u, z, x0, y0, x1, y1, sat) {
     if (t) { RT.cache.delete(key); RT.cache.set(key, t); }
     else if (made === 0 || performance.now() - t0 < 10) { t = renderTile(Z, tx, ty, sat); made++; RT.cache.set(key, t); if (RT.cache.size > RT.max) RT.cache.delete(RT.cache.keys().next().value); }
     else more = true;
-    const dx = Math.round(tx * px + ox), dy = Math.round(ty * px + oy), dw = Math.round((tx + 1) * px + ox) - dx, dh = Math.round((ty + 1) * px + oy) - dy;
+    const sew = M.view.rot ? 0.6 : 0;   // a turned map needs a hair of overlap, or thin lines show between tiles
+    const dx = Math.round(tx * px + ox), dy = Math.round(ty * px + oy), dw = Math.round((tx + 1) * px + ox) - dx + sew, dh = Math.round((ty + 1) * px + oy) - dy + sew;
     if (t) { ctx.drawImage(t, dx, dy, dw, dh); continue; }
     for (let up = 1; up <= 4 && Z - up >= 0; up++) {   // until it is ready, stretch a wider tile over the gap
       const p = RT.cache.get((Z - up) + '/' + (tx >> up) + '/' + (ty >> up) + '/' + S); if (!p) continue;
@@ -335,21 +380,24 @@ function paint() {
   // Start every frame from a blank, fully reset canvas (some phones otherwise keep the last picture underneath).
   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.clearRect(0, 0, c.width, c.height);
   ctx.setTransform(M.dpr, 0, 0, M.dpr, 0, 0);
-  const u = upp(), z = M.view.z, { X, Y } = map;
-  const x0 = M.view.cx - M.w / 2 * u, x1 = M.view.cx + M.w / 2 * u, y0 = M.view.cy - M.h / 2 * u, y1 = M.view.cy + M.h / 2 * u;
+  const u = upp(), z = M.view.z, { X, Y } = map, rot = M.view.rot || 0;
+  const hw = rot ? Math.hypot(M.w, M.h) / 2 : M.w / 2, hh = rot ? hw : M.h / 2;   // a turned screen shows a wider piece of map
+  const x0 = M.view.cx - hw * u, x1 = M.view.cx + hw * u, y0 = M.view.cy - hh * u, y1 = M.view.cy + hh * u;
   const ox = M.w / 2 - M.view.cx / u, oy = M.h / 2 - M.view.cy / u;
   const wd = M.world, sat = M.sat, sea = wd && z < 9 && !sat;
+  ctx.imageSmoothingQuality = 'high';
   ctx.fillStyle = sat ? '#1c2a33' : sea ? '#d3e3ee' : '#f3f0e7'; ctx.fillRect(0, 0, M.w, M.h);
+  if (rot) { ctx.translate(M.w / 2, M.h / 2); ctx.rotate(rot); ctx.translate(-M.w / 2, -M.h / 2); }
   if (sat) paintSat(ctx, u, z, ox, oy, x0, y0, x1, y1);
   const halo = sat ? 'rgba(0,0,0,.72)' : 'rgba(243,240,231,.92)';
   if (wd && z < 10) {   // land and country borders, drawn from one cached outline (not needed at street level)
-    const s = TWO32 / wd.grid / u; ctx.save(); ctx.setTransform(M.dpr * s, 0, 0, M.dpr * s, M.dpr * ox, M.dpr * oy);
+    const s = TWO32 / wd.grid / u; ctx.save(); ctx.translate(ox, oy); ctx.scale(s, s);
     if (sea) { ctx.fillStyle = '#f3f0e7'; ctx.fill(wd.path); } ctx.lineWidth = 1.1 / s; ctx.strokeStyle = sat ? 'rgba(255,255,255,.6)' : '#bfb39a'; ctx.stroke(wd.path); ctx.restore();
   }
   paintRoads(ctx, u, z, x0, y0, x1, y1, sat);
 
   if (M.route) {   // pieces far off the screen are left out: huge numbers upset some phones' graphics chips
-    const r = M.route; ctx.beginPath(); let px = 0, py = 0, pen = false; const L = -400, R = M.w + 400, T = -400, B = M.h + 400;
+    const r = M.route; ctx.beginPath(); let px = 0, py = 0, pen = false; const ex = 400 + hw - M.w / 2, ey = 400 + hh - M.h / 2, L = -ex, R = M.w + ex, T = -ey, B = M.h + ey;
     for (let i = 0; i < r.nodes.length; i++) {
       const n = r.nodes[i]; const sx = X[n] / u + ox, sy = Y[n] / u + oy;
       if (!i) { px = sx; py = sy; continue; }
@@ -359,12 +407,14 @@ function paint() {
     }
     ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 9; ctx.stroke(); ctx.strokeStyle = '#2f6fde'; ctx.lineWidth = 5.5; ctx.stroke();
   }
+  ctx.setTransform(M.dpr, 0, 0, M.dpr, 0, 0);   // names and markers stay upright when the map is turned
+  const off = (sx, sy) => sx < -60 || sx > M.w + 60 || sy < -20 || sy > M.h + 20;
 
   // place names
   const used = []; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
   for (const p of map.placeList) {
     if (z < PLACE_MINZ[p.t]) continue; if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) continue; if (used.length > 70) break;
-    const sx = p.x / u + ox, sy = p.y / u + oy; const big = p.t <= 1; const poi = p.t >= 5;
+    const [sx, sy] = toS(p.x, p.y); if (off(sx, sy)) continue; const big = p.t <= 1; const poi = p.t >= 5;
     ctx.font = `${big ? '600 15px' : p.t === 2 ? '500 13px' : '12px'} system-ui, sans-serif`;
     const tw = ctx.measureText(p.name).width; const tx = poi ? sx + 8 : sx - tw / 2; const rect = [tx - 3, sy - 9, tx + tw + 3, sy + 9];
     if (used.some((q) => rect[0] < q[2] && rect[2] > q[0] && rect[1] < q[3] && rect[3] > q[1])) continue; used.push(rect);
@@ -375,7 +425,7 @@ function paint() {
 
   if (wd) {
     const label = (p, font, col) => {
-      if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) return; const sx = p.x / u + ox, sy = p.y / u + oy; ctx.font = font;
+      if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) return; const [sx, sy] = toS(p.x, p.y); if (off(sx, sy)) return; ctx.font = font;
       const tw = ctx.measureText(p.name).width; const city = p.kind === 'city'; const tx = city ? sx + 7 : sx - tw / 2; const rect = [tx - 3, sy - 9, tx + tw + 3, sy + 9];
       if (used.some((q) => rect[0] < q[2] && rect[2] > q[0] && rect[1] < q[3] && rect[3] > q[1])) return; used.push(rect);
       if (city) { ctx.fillStyle = p.cap ? '#c15f3c' : '#6b6860'; ctx.beginPath(); ctx.arc(sx, sy, p.cap ? 3.5 : 2.5, 0, 7); ctx.fill(); }
@@ -385,15 +435,16 @@ function paint() {
     for (const c of wd.cities) { if (z >= cityMinZ(c) && used.length < 90 && !inDetail(c)) label(c, '12px system-ui, sans-serif', '#2b2a27'); }
   }
 
-  const dot = (pt, fill, ring, r = 8) => { const sx = toSX(pt.x), sy = toSY(pt.y); ctx.beginPath(); ctx.arc(sx, sy, r, 0, 7); ctx.fillStyle = fill; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = ring; ctx.stroke(); };
+  const dot = (pt, fill, ring, r = 8) => { const [sx, sy] = toS(pt.x, pt.y); ctx.beginPath(); ctx.arc(sx, sy, r, 0, 7); ctx.fillStyle = fill; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = ring; ctx.stroke(); };
   if (M.start) dot(M.start, '#ffffff', '#1f1e1d', 7);
   if (M.pick && !M.route) dot(M.pick, '#c15f3c', '#ffffff', 8);
   if (M.dest) dot(M.dest, '#1f1e1d', '#ffffff', 9);
+  const nb = $('map-north'); if (nb) { nb.hidden = !rot; nb.firstChild && (nb.firstChild.style.transform = `rotate(${rot}rad)`); }
   if (M.gps) {
-    const sx = toSX(M.gps.x), sy = toSY(M.gps.y); const rad = Math.min(200, (M.gps.acc || 0) / mPerUnit(M.gps.y) / u);
+    const [sx, sy] = toS(M.gps.x, M.gps.y); const rad = Math.min(200, (M.gps.acc || 0) / mPerUnit(M.gps.y) / u);
     if (rad > 12) { ctx.beginPath(); ctx.arc(sx, sy, rad, 0, 7); ctx.fillStyle = 'rgba(47,111,222,.12)'; ctx.fill(); }
     if (M.gps.heading != null) {   // a small arrow showing which way you are moving
-      ctx.save(); ctx.translate(sx, sy); ctx.rotate(M.gps.heading); ctx.beginPath(); ctx.moveTo(0, -19); ctx.lineTo(7, -9); ctx.lineTo(-7, -9); ctx.closePath(); ctx.fillStyle = '#2f6fde'; ctx.fill(); ctx.restore();
+      ctx.save(); ctx.translate(sx, sy); ctx.rotate(M.gps.heading + rot); ctx.beginPath(); ctx.moveTo(0, -19); ctx.lineTo(7, -9); ctx.lineTo(-7, -9); ctx.closePath(); ctx.fillStyle = '#2f6fde'; ctx.fill(); ctx.restore();
     }
     dot(M.gps, '#2f6fde', '#ffffff', 8);
   }
@@ -577,6 +628,8 @@ function directions() {
   if (M.map.stub) { msg('Directions need a country street map. Add one under Setup.'); return; }
   const from = M.start || M.gps;
   if (!from) { M.waitingRoute = true; ensureGps(); msg('Waiting for GPS… Or tap where you are and choose “Start from here”.'); renderSheet(); return; }
+  const other = builtInFor(from, M.dest);
+  if (other && !M.retried) { const dest = M.dest, start = M.start; M.retried = true; switchBuiltIn(other).then((ok) => { M.dest = dest; M.start = start; if (ok) directions(); M.retried = false; }); return; }
   if (!makeRoute(from, M.dest)) { clearRoute(); msg(M.map.stub ? 'Directions need a country street map. Add one under Setup.' : 'No road route was found between these two points. Directions work inside ' + M.map.name + '.'); }
   renderSheet(); draw();
 }
@@ -634,7 +687,7 @@ function search(q) {
   }
   for (const p of hits) {
     const li = document.createElement('li'); li.textContent = p.name; const sm = document.createElement('small'); sm.textContent = p.kind === 'country' ? 'country' : p.kind ? (p.cap ? 'capital · ' : 'city · ') + p.country : PLACE_TYPES[p.t].replace('_', ' '); li.append(sm);
-    li.onclick = () => { box.hidden = true; $('map-search').value = p.name; $('map-search').blur(); M.follow = false; flyTo(p.x, p.y, p.kind === 'country' ? 5 : p.kind ? 9 : Math.max(M.view.z, p.t <= 1 ? 13 : 15.5)); pickAt(p.x, p.y, p.name); };
+    li.onclick = async () => { box.hidden = true; $('map-search').value = p.name; $('map-search').blur(); M.follow = false; if (p.kind === 'city') await switchBuiltIn(builtInFor(p)); flyTo(p.x, p.y, p.kind === 'country' ? 5 : p.kind ? 9 : Math.max(M.view.z, p.t <= 1 ? 13 : 15.5)); pickAt(p.x, p.y, p.name); };
     box.append(li);
   }
   if (!hits.length) { const li = document.createElement('li'); li.textContent = 'No place with that name on this map'; li.className = 'none'; box.append(li); }
@@ -644,8 +697,9 @@ function search(q) {
 /* ---------- touch ---------- */
 function wireCanvas() {
   const c = $('map-canvas'); const pts = new Map(); let moved = 0, downAt = 0, pinch = 0, mid = null, lastTap = 0, tapTimer = 0, vel = { x: 0, y: 0, t: 0 }, fling = 0;
-  const clampZ = (z) => Math.min(19, Math.max(1.5, z));
-  const anchor = (sx, sy, w) => { M.view.cx = w.x - (sx - M.w / 2) * upp(); M.view.cy = w.y - (sy - M.h / 2) * upp(); };
+  const clampZ = (z) => Math.min(20, Math.max(1.5, z));
+  const anchor = (sx, sy, w) => { const [a, b] = turn(sx - M.w / 2, sy - M.h / 2, -M.view.rot); M.view.cx = w.x - a * upp(); M.view.cy = w.y - b * upp(); };
+  let ang = null, turned = 0;   // two-finger turning starts only after a clear twist, so pinching does not turn the map by accident
   const zoomAt = (sx, sy, dz) => { const w = fromS(sx, sy); M.view.z = clampZ(M.view.z + dz); anchor(sx, sy, w); draw(); };
   const glideZoom = (sx, sy, dz) => {   // zoom smoothly, keeping the touched point where it is
     const w = fromS(sx, sy), z0 = M.view.z, z1 = clampZ(z0 + dz), t0 = performance.now(); cancelAnimationFrame(M.anim);
@@ -656,32 +710,44 @@ function wireCanvas() {
   const local = (e) => { const r = c.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
   c.addEventListener('pointerdown', (e) => {
     cancelAnimationFrame(M.anim); cancelAnimationFrame(fling); try { c.setPointerCapture(e.pointerId); } catch {} pts.set(e.pointerId, local(e));
-    if (pts.size === 1) { moved = 0; downAt = Date.now(); vel = { x: 0, y: 0, t: performance.now() }; } pinch = 0; mid = null;
+    if (pts.size === 1) { moved = 0; downAt = Date.now(); vel = { x: 0, y: 0, t: performance.now() }; } pinch = 0; mid = null; ang = null; turned = 0;
   });
   c.addEventListener('pointermove', (e) => {
     if (!pts.has(e.pointerId)) return; const prev = pts.get(e.pointerId), cur = local(e); pts.set(e.pointerId, cur);
     if (pts.size === 1) {
       const dx = cur.x - prev.x, dy = cur.y - prev.y; moved += Math.abs(dx) + Math.abs(dy); if (moved <= 6) return;
-      unfollow(); M.view.cx -= dx * upp(); M.view.cy -= dy * upp(); const now = performance.now(), dt = Math.max(1, now - vel.t);
+      unfollow(); panBy(dx, dy); const now = performance.now(), dt = Math.max(1, now - vel.t);
       vel = { x: 0.6 * dx / dt + 0.4 * vel.x, y: 0.6 * dy / dt + 0.4 * vel.y, t: now }; draw();
     } else if (pts.size === 2) {   // two fingers: zoom around the point between them, and move with it
       const [a, b] = [...pts.values()]; const d = Math.hypot(a.x - b.x, a.y - b.y), m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-      if (pinch && mid) { M.view.cx -= (m.x - mid.x) * upp(); M.view.cy -= (m.y - mid.y) * upp(); zoomAt(m.x, m.y, Math.log2(d / pinch)); }
-      pinch = d; mid = m; moved = 9999; unfollow();
+      const an = Math.atan2(b.y - a.y, b.x - a.x);
+      if (pinch && mid) {
+        panBy(m.x - mid.x, m.y - mid.y);
+        let da = an - ang; da = ((da + 3 * Math.PI) % (2 * Math.PI)) - Math.PI; turned += da;
+        if (Math.abs(turned) > 0.2 || M.view.rot) { const w = fromS(m.x, m.y); M.view.rot = ((M.view.rot + da + 3 * Math.PI) % (2 * Math.PI)) - Math.PI; anchor(m.x, m.y, w); }
+        zoomAt(m.x, m.y, Math.log2(d / pinch));
+      }
+      pinch = d; mid = m; ang = an; moved = 9999; unfollow();
     }
   });
   const up = (e) => {
-    if (!pts.has(e.pointerId)) return; const p = pts.get(e.pointerId); pts.delete(e.pointerId); pinch = 0; mid = null; if (pts.size) return;
+    if (!pts.has(e.pointerId)) return; const p = pts.get(e.pointerId); pts.delete(e.pointerId); pinch = 0; mid = null; ang = null; if (pts.size) return;
+    if (Math.abs(M.view.rot) < 0.07) M.view.rot = 0;   // nearly north-up: snap to north
     if (moved > 6) {   // let the map keep sliding a little after a quick swipe
       let vx = vel.x, vy = vel.y, last = performance.now(); if (moved >= 9999 || last - vel.t > 90 || Math.hypot(vx, vy) < 0.25) return;
-      const slide = (now) => { const dt = Math.min(40, now - last); last = now; M.view.cx -= vx * dt * upp(); M.view.cy -= vy * dt * upp(); const f = 0.995 ** dt; vx *= f; vy *= f; paint(); if (Math.hypot(vx, vy) > 0.03) fling = requestAnimationFrame(slide); };
+      const slide = (now) => { const dt = Math.min(40, now - last); last = now; panBy(vx * dt, vy * dt); const f = 0.995 ** dt; vx *= f; vy *= f; paint(); if (Math.hypot(vx, vy) > 0.03) fling = requestAnimationFrame(slide); };
       fling = requestAnimationFrame(slide); return;
     }
     if (!M.map) return; const now = Date.now();
     if (now - lastTap < 300) { clearTimeout(tapTimer); lastTap = 0; glideZoom(p.x, p.y, 1); return; }   // double tap: zoom in
     lastTap = now; const w = fromS(p.x, p.y); tapTimer = setTimeout(() => pickAt(w.x, w.y), 260);
   };
-  c.addEventListener('pointerup', up); c.addEventListener('pointercancel', (e) => { pts.delete(e.pointerId); pinch = 0; mid = null; });
+  c.addEventListener('pointerup', up); c.addEventListener('pointercancel', (e) => { pts.delete(e.pointerId); pinch = 0; mid = null; ang = null; });
+  $('map-north').onclick = () => {   // turn the map back to north-up
+    const r0 = M.view.rot, t0 = performance.now(); cancelAnimationFrame(M.anim);
+    const step = (now) => { const t = Math.min(1, (now - t0) / 260); M.view.rot = r0 * (1 - t) ** 3; if (t === 1) M.view.rot = 0; paint(); if (t < 1) M.anim = requestAnimationFrame(step); };
+    M.anim = requestAnimationFrame(step);
+  };
   c.addEventListener('wheel', (e) => { e.preventDefault(); const p = local(e); zoomAt(p.x, p.y, -e.deltaY / 300); }, { passive: false });
   $('map-zoom-in').onclick = () => glideZoom(M.w / 2, M.h / 2, 1); $('map-zoom-out').onclick = () => glideZoom(M.w / 2, M.h / 2, -1);
   $('map-locate').onclick = () => { ensureGps(); if (M.gps) { M.follow = true; $('map-locate').classList.add('on'); flyTo(M.gps.x, M.gps.y, Math.max(M.view.z, 16)); if (M.nav) renderSheet(); } else { M.wantLocate = true; msg('Looking for GPS… This can take a minute outdoors with no data.'); } };
@@ -700,14 +766,17 @@ export async function initMaps(root) {
   const onFile = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) await importMap(f); };
   $('map-file').onchange = onFile; $('map-file-2').onchange = onFile;
   $('map-delete').onclick = () => { if (confirm('Delete the map from this device?')) deleteMap(); };
-  let ok = false; try { ok = await loadStored(); } catch (e) { console.warn('stored map unreadable', e); }
+  await builtInList; let ok = false, pick = null; try { pick = localStorage.getItem('builtInMap'); } catch {}
+  if (NATIVE && pick) ok = await useBuiltIn();   // a built-in map chosen under Setup
+  if (!ok) try { ok = await loadStored(); } catch (e) { console.warn('stored map unreadable', e); }
   let off = false; try { off = !!localStorage.getItem('noBuiltInMap'); } catch {}
   if (!ok && NATIVE && !off) ok = await useBuiltIn();
   if (!ok) showWorld();
+  const sel = $('map-choose'); if (sel) sel.onchange = () => { const b = BUILT_INS.find((x) => x.file === sel.value); if (b) switchBuiltIn(b).then(() => { M.needFit = true; resize(); }); };
   $('map-get').onclick = () => { try { localStorage.removeItem('noBuiltInMap'); } catch {} return NATIVE ? useBuiltIn().then(renderMapInfo) : getBuiltIn(); };
   loadWorld(); satInit(); let sat = false; try { sat = !!localStorage.getItem('mapSat'); } catch {} if (sat) setSat(true);
   renderMapInfo();
 }
-M.api = { parseLocation, setSat, SAT, makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint };
+M.api = { parseLocation, setSat, SAT, makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint, switchBuiltIn, builtIns: () => BUILT_INS };
 M.api.speakTest = async (text) => { if (!TTS) return { native: false, web: 'speechSynthesis' in window }; const l = await TTS.getSupportedLanguages().catch((e) => ({ error: String(e) })); const said = await Promise.race([TTS.speak({ text, lang: 'en-US' }).then(() => 'spoken', (e) => 'failed: ' + (e?.message || e)), new Promise((r) => setTimeout(() => r('timeout'), 9000))]); return { native: true, languages: l.languages ? l.languages.length : l, said }; };
 export const mapShown = () => resize();

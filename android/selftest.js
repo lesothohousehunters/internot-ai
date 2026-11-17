@@ -37,6 +37,21 @@
     log('sat', { local: internotMap.api.SAT.local, tiles: [...internotMap.api.SAT.tiles.values()].filter((t) => t.img).length });
     await shot('map-satellite');
     internotMap.api.setSat(false);
+    // houses close up, and the map turned with two fingers
+    log('houses', { count: internotMap.map.houses ? internotMap.map.houses.B : 0, maps: internotMap.api.builtIns().map((m) => m.name) });
+    if (a) { internotMap.view.cx = a.x; internotMap.view.cy = a.y; internotMap.view.z = 17.5; internotMap.api.paint(); await wait(2500); internotMap.api.paint(); }
+    await shot('map-houses');
+    internotMap.view.rot = 0.55; internotMap.api.paint(); await wait(2500); internotMap.api.paint(); await shot('map-turned'); internotMap.view.rot = 0;
+    // the other built-in country maps
+    for (const [file, from, to] of [['south-africa.imap', 'maseru', 'bloemfontein'], ['botswana.imap', 'gaborone', 'francistown']]) {
+      const m = internotMap.api.builtIns().find((x) => x.file === file); if (!m) { log('country', { file, missing: true }); continue; }
+      const t0 = performance.now(); const opened = await internotMap.api.switchBuiltIn(m); const ms = Math.round(performance.now() - t0);
+      const p = find(from), q = find(to); const routed = !!(p && q && internotMap.api.makeRoute(p, q));
+      if (routed) { internotMap.view.cx = (p.x + q.x) / 2; internotMap.view.cy = (p.y + q.y) / 2; internotMap.view.z = 7.5; internotMap.api.paint(); }
+      log('country', { file, opened, ms, name: internotMap.map.name, roads: internotMap.map.W, houses: internotMap.map.houses ? internotMap.map.houses.B : 0, from: !!p, to: !!q, routed, km: internotMap.route && Math.round(internotMap.route.total / 1000) });
+      await wait(1500); await shot('map-' + file.split('.')[0]); internotMap.route = null;
+    }
+    { const l = internotMap.api.builtIns()[0]; if (l) await internotMap.api.switchBuiltIn(l); }
     // a location pasted from WhatsApp
     const box = document.getElementById('map-search'); box.value = 'https://maps.google.com/maps?q=-29.31678%2C27.48226&z=17&hl=en'; box.dispatchEvent(new Event('input'));
     await wait(400); document.querySelector('#map-results li')?.click(); await wait(1500);

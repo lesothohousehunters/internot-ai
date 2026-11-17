@@ -141,10 +141,10 @@ public class BrainPlugin extends Plugin {
                 JSObject m = meta();
                 if (m != null) { call.resolve(m); return; }   // a model is already here: never replace it
                 try (AssetFileDescriptor fd = getContext().getAssets().openFd("public/bundled/model.gguf"); InputStream in = fd.createInputStream()) {
-                    copyIn(in, fd.getLength(), "Qwen2.5 0.5B (built in)");
+                    copyIn(in, fd.getLength(), "Qwen2.5 1.5B (built in)");
                 }
                 JSONObject o = new JSONObject();
-                o.put("name", "Qwen2.5 0.5B (built in)");
+                o.put("name", "Qwen2.5 1.5B (built in)");
                 o.put("bundled", true);
                 try (FileOutputStream out = new FileOutputStream(metaFile())) { out.write(o.toString().getBytes(StandardCharsets.UTF_8)); }
                 call.resolve(meta());

@@ -7,8 +7,8 @@ const [, , out, name = 'Lesotho', a = '26.9', b = '-30.75', c = '29.6', d = '-28
 const box = [+a, +b, +c, +d], world = 4, max = +maxZ, TWO32 = 4294967296;
 const lonToX = (lon) => Math.min(TWO32 - 1, Math.max(0, Math.round((lon + 180) / 360 * TWO32)));
 const latToY = (lat) => { const s = Math.sin(lat * Math.PI / 180); return Math.min(TWO32 - 1, Math.max(0, Math.round((0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * TWO32))); };
-// The 2016 pictures are free to share with credit (CC BY 4.0); later years are tried only if those are gone.
-const LAYERS = [['s2cloudless_3857', '2016'], ['s2cloudless-2016_3857', '2016'], ['s2cloudless-2017_3857', '2017'], ['s2cloudless-2020_3857', '2020']];
+// Only the 2016 pictures: free to use with credit, also commercially (CC BY 4.0). Later years are non-commercial only, so they are never used.
+const LAYERS = [['s2cloudless_3857', '2016'], ['s2cloudless-2016_3857', '2016']];
 let layer = LAYERS[0][0], year = LAYERS[0][1];
 const url = (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/${layer}/default/g/${z}/${y}/${x}.jpg`;
 const get = (u) => fetch(u, { signal: AbortSignal.timeout(20000), headers: { 'user-agent': 'internot-ai-build (open source offline map app)' } });

@@ -1,0 +1,19 @@
+# Render blueprint for the Internot AI server (free web service).
+# The database is Neon: paste its connection string as DATABASE_URL when Render asks.
+services:
+  - type: web
+    name: internot-server
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_TOKEN
+        generateValue: true
+      - key: NODE_VERSION
+        value: "22"
