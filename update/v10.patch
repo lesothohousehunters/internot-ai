@@ -1,0 +1,972 @@
+diff --git a/android/BrainPlugin.java b/android/BrainPlugin.java
+index f2ce4a0..df44d05 100644
+--- a/android/BrainPlugin.java
++++ b/android/BrainPlugin.java
+@@ -141,10 +141,10 @@ public class BrainPlugin extends Plugin {
+                 JSObject m = meta();
+                 if (m != null) { call.resolve(m); return; }   // a model is already here: never replace it
+                 try (AssetFileDescriptor fd = getContext().getAssets().openFd("public/bundled/model.gguf"); InputStream in = fd.createInputStream()) {
+-                    copyIn(in, fd.getLength(), "Qwen2.5 0.5B (built in)");
++                    copyIn(in, fd.getLength(), "Qwen2.5 1.5B (built in)");
+                 }
+                 JSONObject o = new JSONObject();
+-                o.put("name", "Qwen2.5 0.5B (built in)");
++                o.put("name", "Qwen2.5 1.5B (built in)");
+                 o.put("bundled", true);
+                 try (FileOutputStream out = new FileOutputStream(metaFile())) { out.write(o.toString().getBytes(StandardCharsets.UTF_8)); }
+                 call.resolve(meta());
+diff --git a/android/emulator-test.sh b/android/emulator-test.sh
+index 9371f06..2562b22 100644
+--- a/android/emulator-test.sh
++++ b/android/emulator-test.sh
+@@ -8,7 +8,7 @@ adb logcat -c
+ adb shell am start -n org.internot.app/.MainActivity
+ adb shell dumpsys package com.google.android.webview | grep -m1 versionName > test-out/webview.txt 2>&1 || true
+ seen=0
+-for i in $(seq 1 660); do
++for i in $(seq 1 1000); do
+   sleep 2
+   adb logcat -d -v time 2>/dev/null | grep -E "INTERNOT-TEST|Capacitor.*(E/|rror)|AndroidRuntime|chromium.*(Uncaught|rror)" | cut -c1-1500 > test-out/report.txt
+   n=$(grep -c "INTERNOT-TEST shot" test-out/report.txt)
+diff --git a/android/selftest.js b/android/selftest.js
+index 500dada..5b0111c 100644
+--- a/android/selftest.js
++++ b/android/selftest.js
+@@ -37,6 +37,21 @@
+     log('sat', { local: internotMap.api.SAT.local, tiles: [...internotMap.api.SAT.tiles.values()].filter((t) => t.img).length });
+     await shot('map-satellite');
+     internotMap.api.setSat(false);
++    // houses close up, and the map turned with two fingers
++    log('houses', { count: internotMap.map.houses ? internotMap.map.houses.B : 0, maps: internotMap.api.builtIns().map((m) => m.name) });
++    if (a) { internotMap.view.cx = a.x; internotMap.view.cy = a.y; internotMap.view.z = 17.5; internotMap.api.paint(); await wait(2500); internotMap.api.paint(); }
++    await shot('map-houses');
++    internotMap.view.rot = 0.55; internotMap.api.paint(); await wait(2500); internotMap.api.paint(); await shot('map-turned'); internotMap.view.rot = 0;
++    // the other built-in country maps
++    for (const [file, from, to] of [['south-africa.imap', 'maseru', 'bloemfontein'], ['botswana.imap', 'gaborone', 'francistown']]) {
++      const m = internotMap.api.builtIns().find((x) => x.file === file); if (!m) { log('country', { file, missing: true }); continue; }
++      const t0 = performance.now(); const opened = await internotMap.api.switchBuiltIn(m); const ms = Math.round(performance.now() - t0);
++      const p = find(from), q = find(to); const routed = !!(p && q && internotMap.api.makeRoute(p, q));
++      if (routed) { internotMap.view.cx = (p.x + q.x) / 2; internotMap.view.cy = (p.y + q.y) / 2; internotMap.view.z = 7.5; internotMap.api.paint(); }
++      log('country', { file, opened, ms, name: internotMap.map.name, roads: internotMap.map.W, houses: internotMap.map.houses ? internotMap.map.houses.B : 0, from: !!p, to: !!q, routed, km: internotMap.route && Math.round(internotMap.route.total / 1000) });
++      await wait(1500); await shot('map-' + file.split('.')[0]); internotMap.route = null;
++    }
++    { const l = internotMap.api.builtIns()[0]; if (l) await internotMap.api.switchBuiltIn(l); }
+     // a location pasted from WhatsApp
+     const box = document.getElementById('map-search'); box.value = 'https://maps.google.com/maps?q=-29.31678%2C27.48226&z=17&hl=en'; box.dispatchEvent(new Event('input'));
+     await wait(400); document.querySelector('#map-results li')?.click(); await wait(1500);
+diff --git a/internot-ai-v0.4/index.html b/internot-ai-v0.4/index.html
+index e219c27..c2f7684 100644
+--- a/internot-ai-v0.4/index.html
++++ b/internot-ai-v0.4/index.html
+@@ -43,7 +43,7 @@
+       <canvas id="map-canvas"></canvas>
+       <div id="map-search-box" class="map-search"><input id="map-search" type="search" placeholder="Search a place or paste a location" autocomplete="off"><button id="map-paste" type="button">Paste</button><ul id="map-results" hidden></ul></div>
+       <div id="nav-banner" class="nav-banner" hidden><div id="nav-dist"></div><div id="nav-next"></div><small id="nav-left"></small></div>
+-      <div class="map-btns"><button id="map-zoom-in" type="button" aria-label="Zoom in">+</button><button id="map-zoom-out" type="button" aria-label="Zoom out">−</button><button id="map-locate" type="button" aria-label="Show my location">◎</button><button id="map-layer" type="button" class="txt" aria-label="Show satellite pictures">Sat</button></div>
++      <div class="map-btns"><button id="map-zoom-in" type="button" aria-label="Zoom in">+</button><button id="map-zoom-out" type="button" aria-label="Zoom out">−</button><button id="map-locate" type="button" aria-label="Show my location">◎</button><button id="map-layer" type="button" class="txt" aria-label="Show satellite pictures">Sat</button><button id="map-north" type="button" aria-label="Turn the map back to north" hidden><span>⬆</span></button></div>
+       <div id="map-msg" class="map-msg" hidden></div>
+       <div id="map-sheet" class="map-sheet" hidden></div>
+       <div id="map-attrib" class="map-attrib">© OpenStreetMap contributors · Natural Earth</div>
+@@ -122,7 +122,7 @@
+     <details class="card">
+       <summary>Download a model once over Wi‑Fi</summary>
+       <p class="hint">Only needed if you do not already have a model file. This is the one step that uses the internet.</p>
+-      <input id="model-url" type="url" inputmode="url" value="https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf">
++      <input id="model-url" type="url" inputmode="url" value="https://huggingface.co/bartowski/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf">
+       <div class="row wrap"><button id="model-download" type="button">Download</button></div>
+     </details>
+ 
+@@ -143,6 +143,7 @@
+ 
+     <h2>Maps</h2>
+     <div class="card"><div id="map-info" class="model-info">World map only.</div>
++      <div id="map-choose-row" class="row wrap" hidden><label for="map-choose">Built-in map</label><select id="map-choose"></select></div>
+       <p class="hint">The world map is always here. A country map adds every street, village and clinic, and turn-by-turn directions.</p>
+       <div class="row wrap"><button id="map-get" type="button" class="primary" hidden>Get the Lesotho street map</button>
+         <label class="button">Add a country map file<input id="map-file" type="file" accept=".pbf,.imap,application/octet-stream" hidden></label></div>
+diff --git a/internot-ai-v0.4/maps.js b/internot-ai-v0.4/maps.js
+index 0c87977..faa5e70 100644
+--- a/internot-ai-v0.4/maps.js
++++ b/internot-ai-v0.4/maps.js
+@@ -13,7 +13,7 @@ const PLACE_MINZ = [0, 7, 10.5, 12.5, 12.5, 13.5, 14, 14, 14, 14.5, 15, 15, 15,
+ const PLACE_RANK = [0, 1, 2, 4, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+ 
+ const M = {
+-  root: null, map: null, mem: null, view: { cx: 0, cy: 0, z: 10 }, w: 0, h: 0,
++  root: null, map: null, mem: null, view: { cx: 0, cy: 0, z: 10, rot: 0 }, w: 0, h: 0,
+   gps: null, watch: null, follow: false, start: null, dest: null, pick: null, route: null, nav: null,
+   mute: false, raf: 0, spoken: [], wake: null, world: null,
+ };
+@@ -22,10 +22,12 @@ window.internotMap = M;
+ /* ---------- geometry ---------- */
+ const mPerUnit = (y) => EARTH / TWO32 / Math.cosh(Math.PI * (1 - 2 * y / TWO32));
+ const upp = () => TWO32 / (256 * 2 ** M.view.z);                 // map units per screen pixel
+-const toSX = (x) => (x - M.view.cx) / upp() + M.w / 2;
+-const toSY = (y) => (y - M.view.cy) / upp() + M.h / 2;
++// The map can be turned with two fingers: M.view.rot is the angle (radians) the map is turned on the screen.
++const turn = (dx, dy, a) => { const c = Math.cos(a), s = Math.sin(a); return [dx * c - dy * s, dx * s + dy * c]; };
++const toS = (x, y) => { const [a, b] = turn((x - M.view.cx) / upp(), (y - M.view.cy) / upp(), M.view.rot); return [a + M.w / 2, b + M.h / 2]; };
+ const xToLon = (x) => x / TWO32 * 360 - 180, yToLat = (y) => Math.atan(Math.sinh(Math.PI * (1 - 2 * y / TWO32))) * 180 / Math.PI;
+-const fromS = (sx, sy) => ({ x: M.view.cx + (sx - M.w / 2) * upp(), y: M.view.cy + (sy - M.h / 2) * upp() });
++const fromS = (sx, sy) => { const [a, b] = turn(sx - M.w / 2, sy - M.h / 2, -M.view.rot); return { x: M.view.cx + a * upp(), y: M.view.cy + b * upp() }; };
++const panBy = (dx, dy) => { const [a, b] = turn(dx, dy, -M.view.rot); M.view.cx -= a * upp(); M.view.cy -= b * upp(); };   // move the map with a finger
+ function metres(ax, ay, bx, by) { return Math.hypot(ax - bx, ay - by) * mPerUnit((ay + by) / 2); }
+ const nodeDist = (a, b) => { const m = M.map; return metres(m.X[a], m.Y[a], m.X[b], m.Y[b]); };
+ const bearing = (ax, ay, bx, by) => Math.atan2(bx - ax, -(by - ay)) * 180 / Math.PI;
+@@ -102,28 +104,48 @@ function setProgress(frac, label) {
+   if (frac != null) { $('map-progress-bar').style.width = Math.round(frac * 100) + '%'; $('map-progress-label').textContent = label || ''; }
+   window.internotLoader?.(frac == null ? null : (label || 'Preparing map') + '…', frac ?? undefined);
+ }
+-// A ready-made country map that ships with the app (inside the Android app, or beside the web app).
+-const BUILT_IN = './maps/lesotho.imap';
++// Ready-made country maps that ship with the app (inside the Android app, or beside the web app).
++// maps/list.json names them; without it there is only Lesotho.
++let BUILT_INS = [{ file: 'lesotho.imap', name: 'Lesotho' }];
++const builtInList = fetch('./maps/list.json').then((r) => (r.ok ? r.json() : null)).then((l) => { if (Array.isArray(l) && l.length) BUILT_INS = l; }, () => {});
++const chosen = () => { let f = null; try { f = localStorage.getItem('builtInMap'); } catch {} return BUILT_INS.find((b) => b.file === f) || BUILT_INS[0]; };
++const builtInUrl = (b = chosen()) => './maps/' + b.file;
+ const NATIVE = !!window.Capacitor;
+ const TTS = NATIVE ? window.capacitorExports?.registerPlugin?.('TextToSpeech') : null;
+ let builtIn = null;
+-function builtInAvailable() { return builtIn ||= fetch(BUILT_IN, { method: 'HEAD' }).then((r) => r.ok && !/html/.test(r.headers.get('content-type') || ''), () => false); }
+-async function useBuiltIn() {   // Android app: the file is already on the phone, so read it in place
+-  try { const r = await fetch(BUILT_IN); if (!r.ok) return false; const buf = await r.arrayBuffer(); decodeImap(buf); M.mem = buf; return await loadStored(); } catch (e) { console.warn('built-in map unreadable', e); M.mem = null; return false; }
++function builtInAvailable() { return builtIn ||= fetch(builtInUrl(BUILT_INS[0]), { method: 'HEAD' }).then((r) => r.ok && !/html/.test(r.headers.get('content-type') || ''), () => false); }
++async function useBuiltIn(b = chosen()) {   // Android app: the file is already on the phone, so read it in place
++  try {
++    const r = await fetch(builtInUrl(b)); if (!r.ok) return false; const buf = await r.arrayBuffer(); decodeImap(buf);
++    M.mem = null; M.map = null; RT.cache.clear(); RT.map = null; M.mem = buf; M.builtIn = b.file; return await loadStored();
++  } catch (e) { console.warn('built-in map unreadable', e); M.mem = null; return false; }
++}
++// The built-in map that covers these points (the one in use first), for searching and directions across borders.
++function builtInFor(...pts) {
++  if (!NATIVE || BUILT_INS.length < 2) return null;
++  const inside = (b) => b.bbox && pts.every((p) => p.x >= b.bbox[0] && p.x <= b.bbox[2] && p.y >= b.bbox[1] && p.y <= b.bbox[3]);
++  const cur = BUILT_INS.find((b) => b.file === M.builtIn); if (cur && inside(cur)) return null;
++  return BUILT_INS.find(inside) || null;
++}
++async function switchBuiltIn(b) {
++  if (!b || b.file === M.builtIn) return false; try { localStorage.setItem('builtInMap', b.file); localStorage.removeItem('noBuiltInMap'); } catch {}
++  const v = { ...M.view }; setProgress(0.5, 'Opening the ' + b.name + ' map'); endNav(); clearRoute();
++  const ok = await useBuiltIn(b); setProgress(null);
++  if (ok) { M.needFit = false; Object.assign(M.view, v); renderMapInfo(); draw(); } return ok;
+ }
+ async function getBuiltIn() {   // web app: one download, then kept on the device
+   $('map-error').textContent = '';
+   try {
+-    const r = await fetch(BUILT_IN); if (!r.ok || !r.body) throw new Error('The map could not be downloaded. Check the connection and try again.');
++    const r = await fetch(builtInUrl(BUILT_INS[0])); if (!r.ok || !r.body) throw new Error('The map could not be downloaded. Check the connection and try again.');
+     const total = Number(r.headers.get('content-length')) || 0; const rd = r.body.getReader(); const parts = []; let n = 0;
+     for (;;) { const { value, done } = await rd.read(); if (done) break; parts.push(value); n += value.byteLength; setProgress(total ? n / total * 0.9 : 0.5, 'Downloading map'); }
+-    await importMap(new File(parts, 'lesotho.imap'));
++    await importMap(new File(parts, BUILT_INS[0].file));
+   } catch (e) { setProgress(null); $('map-error').textContent = e?.message || 'The map could not be downloaded.'; }
+ }
+ const niceName = (file) => { const b = file.replace(/\.(osm\.pbf|pbf|imap)$/i, '').replace(/-latest$|-\d{6}$/, '').replace(/[-_]+/g, ' ').trim(); return b ? b[0].toUpperCase() + b.slice(1) : 'Map'; };
+ 
+ async function importMap(file) {
+-  $('map-error').textContent = '';
++  $('map-error').textContent = ''; try { localStorage.removeItem('builtInMap'); } catch {} M.builtIn = null;
+   try {
+     let buf; const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+     if (head[0] === 73 && head[1] === 77 && head[2] === 65 && head[3] === 80) { setProgress(0.5, 'Copying map'); buf = await file.arrayBuffer(); }
+@@ -158,6 +180,10 @@ function renderMapInfo() {
+   el.textContent = real ? `${M.map.name} · ${M.map.W.toLocaleString()} roads · ${M.map.placeList.length.toLocaleString()} places · map data from ${M.map.built}` : 'World map only. Add a country map below for streets, villages and directions.';
+   $('map-delete').hidden = !real; $('map-replace').hidden = true;
+   builtInAvailable().then((ok) => { $('map-get').hidden = real || !ok; });
++  const sel = $('map-choose'); if (!sel) return;
++  $('map-choose-row').hidden = !NATIVE || BUILT_INS.length < 2;
++  sel.textContent = ''; for (const b of BUILT_INS) { const o = document.createElement('option'); o.value = b.file; o.textContent = b.name; sel.append(o); }
++  sel.value = M.builtIn || '';
+ }
+ 
+ /* ---------- drawing ---------- */
+@@ -173,9 +199,10 @@ function draw() { if (!M.raf) M.raf = requestAnimationFrame(() => { M.raf = 0; p
+ /* ---------- satellite pictures ---------- */
+ // Built in: the whole world from far out, and Lesotho closer in. Anything else is fetched when there is
+ // internet and kept on the phone, so places you have looked at once stay visible offline.
+-const SAT = { tiles: new Map(), local: null, remoteMax: 14, url: (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/${SAT.local?.layer || 's2cloudless_3857'}/default/g/${z}/${y}/${x}.jpg` };
+-const satCredit = () => `Sentinel-2 cloudless – s2maps.eu by EOX IT Services GmbH (contains modified Copernicus Sentinel data ${SAT.local?.year || '2016'})`;
+-async function satInit() { try { const r = await fetch('./sat/index.json'); if (r.ok) { SAT.local = await r.json(); if (M.sat) draw(); } } catch {} }
++// Only the 2016 pictures are used: EOX lets anyone use them, also commercially, with this credit (later years are non-commercial only).
++const SAT = { tiles: new Map(), local: null, remoteMax: 14, url: (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless_3857/default/g/${z}/${y}/${x}.jpg` };
++const satCredit = () => 'Sentinel-2 cloudless - https://s2maps.eu by EOX IT Services GmbH (Contains modified Copernicus Sentinel data 2016 & 2017)';
++async function satInit() { try { const r = await fetch('./sat/index.json'); if (r.ok) { const L = await r.json(); if (String(L.year) === '2016') { SAT.local = L; if (M.sat) draw(); } } } catch {} }
+ function satLocal(z, x, y) {
+   const L = SAT.local; if (!L) return false; if (z <= L.world) return true; if (z > L.max) return false; const n = 2 ** z, t = (v) => Math.floor(v / TWO32 * n);
+   return x >= t(lonToX(L.box[0])) && x <= t(lonToX(L.box[2])) && y >= t(latToY(L.box[3])) && y <= t(latToY(L.box[1]));
+@@ -244,8 +271,9 @@ export function parseLocation(text) {
+   m = /(?:^|[^\d.\-])(-?\d{1,2}\.\d{3,})\s*[,;\s]\s*(-?\d{1,3}\.\d{3,})(?![\d.])/.exec(t); if (m) return ok(+m[1], +m[2]);
+   return null;
+ }
+-function goLocation(loc) {
++async function goLocation(loc) {
+   const x = lonToX(loc.lon), y = latToY(loc.lat); M.follow = false; $('map-results').hidden = true; $('map-search').blur();
++  await switchBuiltIn(builtInFor({ x, y }));
+   flyTo(x, y, Math.max(M.view.z, 15)); pickAt(x, y, 'Pasted location');
+ }
+ async function copyText(text) {
+@@ -256,7 +284,8 @@ async function copyText(text) {
+ /* ---------- roads: drawn once into small square pictures (tiles), then reused while you move ---------- */
+ // Re-drawing every road on every frame is too slow on low-cost phones; placing ready pictures is fast.
+ const TILE = 256;
+-const RT = { cache: new Map(), map: null, res: Math.min(1.5, window.devicePixelRatio || 1), max: 72 };
++const RT = { cache: new Map(), map: null, res: Math.min(2, window.devicePixelRatio || 1), max: 64 };
++const HOUSE_MINZ = 15;   // house outlines appear from this zoom
+ function wayGrid(map) {
+   const G = 128, [bx0, by0, bx1, by1] = map.bbox, cw = Math.max(1, (bx1 - bx0 + 1) / G), ch = Math.max(1, (by1 - by0 + 1) / G), { box, W } = map;
+   const span = (w) => [Math.max(0, Math.min(G - 1, Math.floor((box[w * 4] - bx0) / cw))), Math.max(0, Math.min(G - 1, Math.floor((box[w * 4 + 2] - bx0) / cw))), Math.max(0, Math.min(G - 1, Math.floor((box[w * 4 + 1] - by0) / ch))), Math.max(0, Math.min(G - 1, Math.floor((box[w * 4 + 3] - by0) / ch)))];
+@@ -292,6 +321,7 @@ function renderTile(Z, tx, ty, sat) {
+     }
+   });
+   const k = Math.min(2.4, Math.max(0.28, 0.28 + (Z - 8) * 0.16)) * (sat ? 0.7 : 1), edge = k < 0.6 ? 0.9 : 1.6;
++  if (map.houses && Z >= HOUSE_MINZ) paintHouses(g, map, X0, Y0, tu, span, sat);
+   g.lineCap = 'round'; g.lineJoin = 'round';
+   if (paths[9]) { g.strokeStyle = '#9fc4e4'; g.lineWidth = 2.2 * k; g.stroke(paths[9]); }
+   for (let cls = 7; cls >= 0; cls--) {          // casings first, so junctions join cleanly
+@@ -303,10 +333,24 @@ function renderTile(Z, tx, ty, sat) {
+   }
+   return cv;
+ }
++function paintHouses(g, map, X0, Y0, tu, span, sat) {   // every house and building, from the map file
++  const h = map.houses, [bx0, by0, bx1, by1] = map.bbox, G = h.G, Q = h.Q, cw = Math.max(1, (bx1 - bx0 + 1) / G), ch = Math.max(1, (by1 - by0 + 1) / G), m = 400 * Q;
++  const a = Math.max(0, Math.floor((X0 - m - bx0) / cw)), b = Math.min(G - 1, Math.floor((X0 + span + m - bx0) / cw)), c = Math.max(0, Math.floor((Y0 - m - by0) / ch)), d = Math.min(G - 1, Math.floor((Y0 + span + m - by0) / ch));
++  if (a > b || c > d) return; const p = new Path2D(); let any = false;
++  for (let cy = c; cy <= d; cy++) for (let i = h.cell[cy * G + a]; i < h.cell[cy * G + b + 1]; i++) {
++    let x = h.ox[i], y = h.oy[i]; if (x < X0 - m || x > X0 + span + m || y < Y0 - m || y > Y0 + span + m) continue;
++    p.moveTo((x - X0) / tu, (y - Y0) / tu);
++    for (let k = h.start[i]; k < h.start[i + 1]; k++) { x += h.steps[k * 2] * Q; y += h.steps[k * 2 + 1] * Q; p.lineTo((x - X0) / tu, (y - Y0) / tu); }
++    p.closePath(); any = true;
++  }
++  if (!any) return;
++  g.fillStyle = sat ? 'rgba(255,255,255,.14)' : '#e2d8c8'; g.fill(p);
++  g.strokeStyle = sat ? 'rgba(255,240,200,.85)' : '#c3b49d'; g.lineWidth = 0.8; g.stroke(p);
++}
+ function paintRoads(ctx, u, z, x0, y0, x1, y1, sat) {
+   const map = M.map; if (!map.W) return;
+   if (RT.map !== map) { RT.cache.clear(); RT.map = map; wayGrid(map); }
+-  const Z = Math.max(0, Math.min(18, Math.round(z))), span = TWO32 / 2 ** Z, px = span / u, [bx0, by0, bx1, by1] = map.bbox;
++  const Z = Math.max(0, Math.min(20, Math.round(z))), span = TWO32 / 2 ** Z, px = span / u, [bx0, by0, bx1, by1] = map.bbox;
+   const ax = Math.floor(Math.max(x0, bx0) / span), bx = Math.floor(Math.min(x1, bx1) / span), ay = Math.floor(Math.max(y0, by0) / span), by = Math.floor(Math.min(y1, by1) / span);
+   if (ax > bx || ay > by) return;
+   const ox = M.w / 2 - M.view.cx / u, oy = M.h / 2 - M.view.cy / u, S = sat ? 1 : 0, t0 = performance.now(), cx = M.view.cx / span, cy = M.view.cy / span;
+@@ -319,7 +363,8 @@ function paintRoads(ctx, u, z, x0, y0, x1, y1, sat) {
+     if (t) { RT.cache.delete(key); RT.cache.set(key, t); }
+     else if (made === 0 || performance.now() - t0 < 10) { t = renderTile(Z, tx, ty, sat); made++; RT.cache.set(key, t); if (RT.cache.size > RT.max) RT.cache.delete(RT.cache.keys().next().value); }
+     else more = true;
+-    const dx = Math.round(tx * px + ox), dy = Math.round(ty * px + oy), dw = Math.round((tx + 1) * px + ox) - dx, dh = Math.round((ty + 1) * px + oy) - dy;
++    const sew = M.view.rot ? 0.6 : 0;   // a turned map needs a hair of overlap, or thin lines show between tiles
++    const dx = Math.round(tx * px + ox), dy = Math.round(ty * px + oy), dw = Math.round((tx + 1) * px + ox) - dx + sew, dh = Math.round((ty + 1) * px + oy) - dy + sew;
+     if (t) { ctx.drawImage(t, dx, dy, dw, dh); continue; }
+     for (let up = 1; up <= 4 && Z - up >= 0; up++) {   // until it is ready, stretch a wider tile over the gap
+       const p = RT.cache.get((Z - up) + '/' + (tx >> up) + '/' + (ty >> up) + '/' + S); if (!p) continue;
+@@ -335,21 +380,24 @@ function paint() {
+   // Start every frame from a blank, fully reset canvas (some phones otherwise keep the last picture underneath).
+   ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.clearRect(0, 0, c.width, c.height);
+   ctx.setTransform(M.dpr, 0, 0, M.dpr, 0, 0);
+-  const u = upp(), z = M.view.z, { X, Y } = map;
+-  const x0 = M.view.cx - M.w / 2 * u, x1 = M.view.cx + M.w / 2 * u, y0 = M.view.cy - M.h / 2 * u, y1 = M.view.cy + M.h / 2 * u;
++  const u = upp(), z = M.view.z, { X, Y } = map, rot = M.view.rot || 0;
++  const hw = rot ? Math.hypot(M.w, M.h) / 2 : M.w / 2, hh = rot ? hw : M.h / 2;   // a turned screen shows a wider piece of map
++  const x0 = M.view.cx - hw * u, x1 = M.view.cx + hw * u, y0 = M.view.cy - hh * u, y1 = M.view.cy + hh * u;
+   const ox = M.w / 2 - M.view.cx / u, oy = M.h / 2 - M.view.cy / u;
+   const wd = M.world, sat = M.sat, sea = wd && z < 9 && !sat;
++  ctx.imageSmoothingQuality = 'high';
+   ctx.fillStyle = sat ? '#1c2a33' : sea ? '#d3e3ee' : '#f3f0e7'; ctx.fillRect(0, 0, M.w, M.h);
++  if (rot) { ctx.translate(M.w / 2, M.h / 2); ctx.rotate(rot); ctx.translate(-M.w / 2, -M.h / 2); }
+   if (sat) paintSat(ctx, u, z, ox, oy, x0, y0, x1, y1);
+   const halo = sat ? 'rgba(0,0,0,.72)' : 'rgba(243,240,231,.92)';
+   if (wd && z < 10) {   // land and country borders, drawn from one cached outline (not needed at street level)
+-    const s = TWO32 / wd.grid / u; ctx.save(); ctx.setTransform(M.dpr * s, 0, 0, M.dpr * s, M.dpr * ox, M.dpr * oy);
++    const s = TWO32 / wd.grid / u; ctx.save(); ctx.translate(ox, oy); ctx.scale(s, s);
+     if (sea) { ctx.fillStyle = '#f3f0e7'; ctx.fill(wd.path); } ctx.lineWidth = 1.1 / s; ctx.strokeStyle = sat ? 'rgba(255,255,255,.6)' : '#bfb39a'; ctx.stroke(wd.path); ctx.restore();
+   }
+   paintRoads(ctx, u, z, x0, y0, x1, y1, sat);
+ 
+   if (M.route) {   // pieces far off the screen are left out: huge numbers upset some phones' graphics chips
+-    const r = M.route; ctx.beginPath(); let px = 0, py = 0, pen = false; const L = -400, R = M.w + 400, T = -400, B = M.h + 400;
++    const r = M.route; ctx.beginPath(); let px = 0, py = 0, pen = false; const ex = 400 + hw - M.w / 2, ey = 400 + hh - M.h / 2, L = -ex, R = M.w + ex, T = -ey, B = M.h + ey;
+     for (let i = 0; i < r.nodes.length; i++) {
+       const n = r.nodes[i]; const sx = X[n] / u + ox, sy = Y[n] / u + oy;
+       if (!i) { px = sx; py = sy; continue; }
+@@ -359,12 +407,14 @@ function paint() {
+     }
+     ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 9; ctx.stroke(); ctx.strokeStyle = '#2f6fde'; ctx.lineWidth = 5.5; ctx.stroke();
+   }
++  ctx.setTransform(M.dpr, 0, 0, M.dpr, 0, 0);   // names and markers stay upright when the map is turned
++  const off = (sx, sy) => sx < -60 || sx > M.w + 60 || sy < -20 || sy > M.h + 20;
+ 
+   // place names
+   const used = []; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round';
+   for (const p of map.placeList) {
+     if (z < PLACE_MINZ[p.t]) continue; if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) continue; if (used.length > 70) break;
+-    const sx = p.x / u + ox, sy = p.y / u + oy; const big = p.t <= 1; const poi = p.t >= 5;
++    const [sx, sy] = toS(p.x, p.y); if (off(sx, sy)) continue; const big = p.t <= 1; const poi = p.t >= 5;
+     ctx.font = `${big ? '600 15px' : p.t === 2 ? '500 13px' : '12px'} system-ui, sans-serif`;
+     const tw = ctx.measureText(p.name).width; const tx = poi ? sx + 8 : sx - tw / 2; const rect = [tx - 3, sy - 9, tx + tw + 3, sy + 9];
+     if (used.some((q) => rect[0] < q[2] && rect[2] > q[0] && rect[1] < q[3] && rect[3] > q[1])) continue; used.push(rect);
+@@ -375,7 +425,7 @@ function paint() {
+ 
+   if (wd) {
+     const label = (p, font, col) => {
+-      if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) return; const sx = p.x / u + ox, sy = p.y / u + oy; ctx.font = font;
++      if (p.x < x0 || p.x > x1 || p.y < y0 || p.y > y1) return; const [sx, sy] = toS(p.x, p.y); if (off(sx, sy)) return; ctx.font = font;
+       const tw = ctx.measureText(p.name).width; const city = p.kind === 'city'; const tx = city ? sx + 7 : sx - tw / 2; const rect = [tx - 3, sy - 9, tx + tw + 3, sy + 9];
+       if (used.some((q) => rect[0] < q[2] && rect[2] > q[0] && rect[1] < q[3] && rect[3] > q[1])) return; used.push(rect);
+       if (city) { ctx.fillStyle = p.cap ? '#c15f3c' : '#6b6860'; ctx.beginPath(); ctx.arc(sx, sy, p.cap ? 3.5 : 2.5, 0, 7); ctx.fill(); }
+@@ -385,15 +435,16 @@ function paint() {
+     for (const c of wd.cities) { if (z >= cityMinZ(c) && used.length < 90 && !inDetail(c)) label(c, '12px system-ui, sans-serif', '#2b2a27'); }
+   }
+ 
+-  const dot = (pt, fill, ring, r = 8) => { const sx = toSX(pt.x), sy = toSY(pt.y); ctx.beginPath(); ctx.arc(sx, sy, r, 0, 7); ctx.fillStyle = fill; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = ring; ctx.stroke(); };
++  const dot = (pt, fill, ring, r = 8) => { const [sx, sy] = toS(pt.x, pt.y); ctx.beginPath(); ctx.arc(sx, sy, r, 0, 7); ctx.fillStyle = fill; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = ring; ctx.stroke(); };
+   if (M.start) dot(M.start, '#ffffff', '#1f1e1d', 7);
+   if (M.pick && !M.route) dot(M.pick, '#c15f3c', '#ffffff', 8);
+   if (M.dest) dot(M.dest, '#1f1e1d', '#ffffff', 9);
++  const nb = $('map-north'); if (nb) { nb.hidden = !rot; nb.firstChild && (nb.firstChild.style.transform = `rotate(${rot}rad)`); }
+   if (M.gps) {
+-    const sx = toSX(M.gps.x), sy = toSY(M.gps.y); const rad = Math.min(200, (M.gps.acc || 0) / mPerUnit(M.gps.y) / u);
++    const [sx, sy] = toS(M.gps.x, M.gps.y); const rad = Math.min(200, (M.gps.acc || 0) / mPerUnit(M.gps.y) / u);
+     if (rad > 12) { ctx.beginPath(); ctx.arc(sx, sy, rad, 0, 7); ctx.fillStyle = 'rgba(47,111,222,.12)'; ctx.fill(); }
+     if (M.gps.heading != null) {   // a small arrow showing which way you are moving
+-      ctx.save(); ctx.translate(sx, sy); ctx.rotate(M.gps.heading); ctx.beginPath(); ctx.moveTo(0, -19); ctx.lineTo(7, -9); ctx.lineTo(-7, -9); ctx.closePath(); ctx.fillStyle = '#2f6fde'; ctx.fill(); ctx.restore();
++      ctx.save(); ctx.translate(sx, sy); ctx.rotate(M.gps.heading + rot); ctx.beginPath(); ctx.moveTo(0, -19); ctx.lineTo(7, -9); ctx.lineTo(-7, -9); ctx.closePath(); ctx.fillStyle = '#2f6fde'; ctx.fill(); ctx.restore();
+     }
+     dot(M.gps, '#2f6fde', '#ffffff', 8);
+   }
+@@ -577,6 +628,8 @@ function directions() {
+   if (M.map.stub) { msg('Directions need a country street map. Add one under Setup.'); return; }
+   const from = M.start || M.gps;
+   if (!from) { M.waitingRoute = true; ensureGps(); msg('Waiting for GPS… Or tap where you are and choose “Start from here”.'); renderSheet(); return; }
++  const other = builtInFor(from, M.dest);
++  if (other && !M.retried) { const dest = M.dest, start = M.start; M.retried = true; switchBuiltIn(other).then((ok) => { M.dest = dest; M.start = start; if (ok) directions(); M.retried = false; }); return; }
+   if (!makeRoute(from, M.dest)) { clearRoute(); msg(M.map.stub ? 'Directions need a country street map. Add one under Setup.' : 'No road route was found between these two points. Directions work inside ' + M.map.name + '.'); }
+   renderSheet(); draw();
+ }
+@@ -634,7 +687,7 @@ function search(q) {
+   }
+   for (const p of hits) {
+     const li = document.createElement('li'); li.textContent = p.name; const sm = document.createElement('small'); sm.textContent = p.kind === 'country' ? 'country' : p.kind ? (p.cap ? 'capital · ' : 'city · ') + p.country : PLACE_TYPES[p.t].replace('_', ' '); li.append(sm);
+-    li.onclick = () => { box.hidden = true; $('map-search').value = p.name; $('map-search').blur(); M.follow = false; flyTo(p.x, p.y, p.kind === 'country' ? 5 : p.kind ? 9 : Math.max(M.view.z, p.t <= 1 ? 13 : 15.5)); pickAt(p.x, p.y, p.name); };
++    li.onclick = async () => { box.hidden = true; $('map-search').value = p.name; $('map-search').blur(); M.follow = false; if (p.kind === 'city') await switchBuiltIn(builtInFor(p)); flyTo(p.x, p.y, p.kind === 'country' ? 5 : p.kind ? 9 : Math.max(M.view.z, p.t <= 1 ? 13 : 15.5)); pickAt(p.x, p.y, p.name); };
+     box.append(li);
+   }
+   if (!hits.length) { const li = document.createElement('li'); li.textContent = 'No place with that name on this map'; li.className = 'none'; box.append(li); }
+@@ -644,8 +697,9 @@ function search(q) {
+ /* ---------- touch ---------- */
+ function wireCanvas() {
+   const c = $('map-canvas'); const pts = new Map(); let moved = 0, downAt = 0, pinch = 0, mid = null, lastTap = 0, tapTimer = 0, vel = { x: 0, y: 0, t: 0 }, fling = 0;
+-  const clampZ = (z) => Math.min(19, Math.max(1.5, z));
+-  const anchor = (sx, sy, w) => { M.view.cx = w.x - (sx - M.w / 2) * upp(); M.view.cy = w.y - (sy - M.h / 2) * upp(); };
++  const clampZ = (z) => Math.min(20, Math.max(1.5, z));
++  const anchor = (sx, sy, w) => { const [a, b] = turn(sx - M.w / 2, sy - M.h / 2, -M.view.rot); M.view.cx = w.x - a * upp(); M.view.cy = w.y - b * upp(); };
++  let ang = null, turned = 0;   // two-finger turning starts only after a clear twist, so pinching does not turn the map by accident
+   const zoomAt = (sx, sy, dz) => { const w = fromS(sx, sy); M.view.z = clampZ(M.view.z + dz); anchor(sx, sy, w); draw(); };
+   const glideZoom = (sx, sy, dz) => {   // zoom smoothly, keeping the touched point where it is
+     const w = fromS(sx, sy), z0 = M.view.z, z1 = clampZ(z0 + dz), t0 = performance.now(); cancelAnimationFrame(M.anim);
+@@ -656,32 +710,44 @@ function wireCanvas() {
+   const local = (e) => { const r = c.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+   c.addEventListener('pointerdown', (e) => {
+     cancelAnimationFrame(M.anim); cancelAnimationFrame(fling); try { c.setPointerCapture(e.pointerId); } catch {} pts.set(e.pointerId, local(e));
+-    if (pts.size === 1) { moved = 0; downAt = Date.now(); vel = { x: 0, y: 0, t: performance.now() }; } pinch = 0; mid = null;
++    if (pts.size === 1) { moved = 0; downAt = Date.now(); vel = { x: 0, y: 0, t: performance.now() }; } pinch = 0; mid = null; ang = null; turned = 0;
+   });
+   c.addEventListener('pointermove', (e) => {
+     if (!pts.has(e.pointerId)) return; const prev = pts.get(e.pointerId), cur = local(e); pts.set(e.pointerId, cur);
+     if (pts.size === 1) {
+       const dx = cur.x - prev.x, dy = cur.y - prev.y; moved += Math.abs(dx) + Math.abs(dy); if (moved <= 6) return;
+-      unfollow(); M.view.cx -= dx * upp(); M.view.cy -= dy * upp(); const now = performance.now(), dt = Math.max(1, now - vel.t);
++      unfollow(); panBy(dx, dy); const now = performance.now(), dt = Math.max(1, now - vel.t);
+       vel = { x: 0.6 * dx / dt + 0.4 * vel.x, y: 0.6 * dy / dt + 0.4 * vel.y, t: now }; draw();
+     } else if (pts.size === 2) {   // two fingers: zoom around the point between them, and move with it
+       const [a, b] = [...pts.values()]; const d = Math.hypot(a.x - b.x, a.y - b.y), m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+-      if (pinch && mid) { M.view.cx -= (m.x - mid.x) * upp(); M.view.cy -= (m.y - mid.y) * upp(); zoomAt(m.x, m.y, Math.log2(d / pinch)); }
+-      pinch = d; mid = m; moved = 9999; unfollow();
++      const an = Math.atan2(b.y - a.y, b.x - a.x);
++      if (pinch && mid) {
++        panBy(m.x - mid.x, m.y - mid.y);
++        let da = an - ang; da = ((da + 3 * Math.PI) % (2 * Math.PI)) - Math.PI; turned += da;
++        if (Math.abs(turned) > 0.2 || M.view.rot) { const w = fromS(m.x, m.y); M.view.rot = ((M.view.rot + da + 3 * Math.PI) % (2 * Math.PI)) - Math.PI; anchor(m.x, m.y, w); }
++        zoomAt(m.x, m.y, Math.log2(d / pinch));
++      }
++      pinch = d; mid = m; ang = an; moved = 9999; unfollow();
+     }
+   });
+   const up = (e) => {
+-    if (!pts.has(e.pointerId)) return; const p = pts.get(e.pointerId); pts.delete(e.pointerId); pinch = 0; mid = null; if (pts.size) return;
++    if (!pts.has(e.pointerId)) return; const p = pts.get(e.pointerId); pts.delete(e.pointerId); pinch = 0; mid = null; ang = null; if (pts.size) return;
++    if (Math.abs(M.view.rot) < 0.07) M.view.rot = 0;   // nearly north-up: snap to north
+     if (moved > 6) {   // let the map keep sliding a little after a quick swipe
+       let vx = vel.x, vy = vel.y, last = performance.now(); if (moved >= 9999 || last - vel.t > 90 || Math.hypot(vx, vy) < 0.25) return;
+-      const slide = (now) => { const dt = Math.min(40, now - last); last = now; M.view.cx -= vx * dt * upp(); M.view.cy -= vy * dt * upp(); const f = 0.995 ** dt; vx *= f; vy *= f; paint(); if (Math.hypot(vx, vy) > 0.03) fling = requestAnimationFrame(slide); };
++      const slide = (now) => { const dt = Math.min(40, now - last); last = now; panBy(vx * dt, vy * dt); const f = 0.995 ** dt; vx *= f; vy *= f; paint(); if (Math.hypot(vx, vy) > 0.03) fling = requestAnimationFrame(slide); };
+       fling = requestAnimationFrame(slide); return;
+     }
+     if (!M.map) return; const now = Date.now();
+     if (now - lastTap < 300) { clearTimeout(tapTimer); lastTap = 0; glideZoom(p.x, p.y, 1); return; }   // double tap: zoom in
+     lastTap = now; const w = fromS(p.x, p.y); tapTimer = setTimeout(() => pickAt(w.x, w.y), 260);
+   };
+-  c.addEventListener('pointerup', up); c.addEventListener('pointercancel', (e) => { pts.delete(e.pointerId); pinch = 0; mid = null; });
++  c.addEventListener('pointerup', up); c.addEventListener('pointercancel', (e) => { pts.delete(e.pointerId); pinch = 0; mid = null; ang = null; });
++  $('map-north').onclick = () => {   // turn the map back to north-up
++    const r0 = M.view.rot, t0 = performance.now(); cancelAnimationFrame(M.anim);
++    const step = (now) => { const t = Math.min(1, (now - t0) / 260); M.view.rot = r0 * (1 - t) ** 3; if (t === 1) M.view.rot = 0; paint(); if (t < 1) M.anim = requestAnimationFrame(step); };
++    M.anim = requestAnimationFrame(step);
++  };
+   c.addEventListener('wheel', (e) => { e.preventDefault(); const p = local(e); zoomAt(p.x, p.y, -e.deltaY / 300); }, { passive: false });
+   $('map-zoom-in').onclick = () => glideZoom(M.w / 2, M.h / 2, 1); $('map-zoom-out').onclick = () => glideZoom(M.w / 2, M.h / 2, -1);
+   $('map-locate').onclick = () => { ensureGps(); if (M.gps) { M.follow = true; $('map-locate').classList.add('on'); flyTo(M.gps.x, M.gps.y, Math.max(M.view.z, 16)); if (M.nav) renderSheet(); } else { M.wantLocate = true; msg('Looking for GPS… This can take a minute outdoors with no data.'); } };
+@@ -700,14 +766,17 @@ export async function initMaps(root) {
+   const onFile = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) await importMap(f); };
+   $('map-file').onchange = onFile; $('map-file-2').onchange = onFile;
+   $('map-delete').onclick = () => { if (confirm('Delete the map from this device?')) deleteMap(); };
+-  let ok = false; try { ok = await loadStored(); } catch (e) { console.warn('stored map unreadable', e); }
++  await builtInList; let ok = false, pick = null; try { pick = localStorage.getItem('builtInMap'); } catch {}
++  if (NATIVE && pick) ok = await useBuiltIn();   // a built-in map chosen under Setup
++  if (!ok) try { ok = await loadStored(); } catch (e) { console.warn('stored map unreadable', e); }
+   let off = false; try { off = !!localStorage.getItem('noBuiltInMap'); } catch {}
+   if (!ok && NATIVE && !off) ok = await useBuiltIn();
+   if (!ok) showWorld();
++  const sel = $('map-choose'); if (sel) sel.onchange = () => { const b = BUILT_INS.find((x) => x.file === sel.value); if (b) switchBuiltIn(b).then(() => { M.needFit = true; resize(); }); };
+   $('map-get').onclick = () => { try { localStorage.removeItem('noBuiltInMap'); } catch {} return NATIVE ? useBuiltIn().then(renderMapInfo) : getBuiltIn(); };
+   loadWorld(); satInit(); let sat = false; try { sat = !!localStorage.getItem('mapSat'); } catch {} if (sat) setSat(true);
+   renderMapInfo();
+ }
+-M.api = { parseLocation, setSat, SAT, makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint };
++M.api = { parseLocation, setSat, SAT, makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint, switchBuiltIn, builtIns: () => BUILT_INS };
+ M.api.speakTest = async (text) => { if (!TTS) return { native: false, web: 'speechSynthesis' in window }; const l = await TTS.getSupportedLanguages().catch((e) => ({ error: String(e) })); const said = await Promise.race([TTS.speak({ text, lang: 'en-US' }).then(() => 'spoken', (e) => 'failed: ' + (e?.message || e)), new Promise((r) => setTimeout(() => r('timeout'), 9000))]); return { native: true, languages: l.languages ? l.languages.length : l, said }; };
+ export const mapShown = () => resize();
+diff --git a/internot-ai-v0.4/osmpbf.js b/internot-ai-v0.4/osmpbf.js
+index 900e9c5..babf725 100644
+--- a/internot-ai-v0.4/osmpbf.js
++++ b/internot-ai-v0.4/osmpbf.js
+@@ -10,6 +10,9 @@ export const PLACE_TYPES = ['city', 'town', 'village', 'hamlet', 'suburb', 'hosp
+ const PLACE_TAG = new Set(['city', 'town', 'village', 'hamlet', 'suburb']);
+ const AMENITY_TAG = new Set(['hospital', 'clinic', 'fuel', 'police', 'school', 'pharmacy', 'bank', 'marketplace', 'bus_station']);
+ const TWO32 = 4294967296;
++const BQ = 16;          // house outlines: corner positions are kept to 16 map units (about 15 cm)
++const BG = 256;         // house outlines are sorted into a 256 x 256 grid, so only nearby ones are read
++const mPerUnit = (y) => 40075016.686 / TWO32 / Math.cosh(Math.PI * (1 - 2 * y / TWO32));
+ 
+ export const lonToX = (lon) => Math.min(TWO32 - 1, Math.max(0, Math.round((lon + 180) / 360 * TWO32)));
+ export const latToY = (lat) => {
+@@ -91,7 +94,14 @@ function packed(p, signed, delta) {
+  * Convert an .osm.pbf into an .imap ArrayBuffer.
+  * onProgress(fraction 0..1, label)
+  */
+-export async function convertPbf(reader, name, onProgress) {
++// opts (all optional, used when maps are made on a computer):
++//   buildings: true      also keep the outline of every house and building
++//   skip: ['service']    leave out these road kinds
++//   simplify: 2          drop road points that change the shape by less than this many metres
++export async function convertPbf(reader, name, onProgress, opts = {}) {
++  const skipCls = new Set((opts.skip || []).map((k) => ROAD_CLASS[k]).filter((c) => c != null));
++  const bStartR = [0]; let bRefs = new Float64Array(opts.buildings ? 1 << 20 : 1), nB = 0;
++  const pushB = (id) => { if (nB === bRefs.length) { const g = new Float64Array(bRefs.length * 2); g.set(bRefs); bRefs = g; } bRefs[nB++] = id; };
+   const names = ['']; const nameIdx = new Map([['', 0]]);
+   const intern = (s) => { let i = nameIdx.get(s); if (i === undefined) { i = names.length; names.push(s); nameIdx.set(s, i); } return i; };
+   const wayClass = [], wayFlags = [], wayName = [], wayStart = [0]; let refs = new Float64Array(1 << 20), nRefs = 0;
+@@ -101,24 +111,28 @@ export async function convertPbf(reader, name, onProgress) {
+ 
+   // Pass 1: roads, rivers and named places drawn as areas.
+   for await (const blk of blocks(reader, (f) => onProgress?.(f * 0.45, 'Reading roads'))) {
+-    const t = tagIndex(blk, ['highway', 'waterway', 'name', 'oneway', 'junction', 'amenity']);
++    const t = tagIndex(blk, ['highway', 'waterway', 'name', 'oneway', 'junction', 'amenity', 'building']);
+     for (const g of blk.groups) {
+       while (g.next()) {
+         if (g.field !== 3) { g.skip(); continue; }
+         const w = g.sub(); let keys = [], vals = [], r = null;
+         while (w.next()) { if (w.field === 2) keys = packed(w, false, false); else if (w.field === 3) vals = packed(w, false, false); else if (w.field === 8) r = packed(w, true, true); else w.skip(); }
+         if (!r || r.length < 2 || !keys.length) continue;
+-        let hw = null, ww = null, nm = '', ow = null, jn = null, am = null;
++        let hw = null, ww = null, nm = '', ow = null, jn = null, am = null, bd = null;
+         for (let i = 0; i < keys.length; i++) {
+           const k = keys[i];
+           if (k === t.get('highway')) hw = str(blk, vals[i]); else if (k === t.get('waterway')) ww = str(blk, vals[i]);
+           else if (k === t.get('name')) nm = str(blk, vals[i]); else if (k === t.get('oneway')) ow = str(blk, vals[i]);
+           else if (k === t.get('junction')) jn = str(blk, vals[i]); else if (k === t.get('amenity')) am = str(blk, vals[i]);
++          else if (k === t.get('building')) bd = str(blk, vals[i]);
+         }
+         if (am && nm && AMENITY_TAG.has(am)) { areaPois.push({ type: PLACE_TYPES.indexOf(am), name: nm, ref: r[0] }); pushRef(r[0]); wayClass.push(255); wayFlags.push(0); wayName.push(0); wayStart.push(nRefs); }
++        if (opts.buildings && bd && bd !== 'no' && !hw && r.length >= 4 && r.length <= 256 && r[0] === r[r.length - 1]) {
++          for (let i = 0; i < r.length - 1; i++) pushB(r[i]); bStartR.push(nB); continue;
++        }
+         let cls = -1;
+         if (hw) { cls = ROAD_CLASS[hw.endsWith('_link') ? hw.slice(0, -5) : hw] ?? -1; } else if (ww === 'river' || ww === 'canal') cls = RIVER;
+-        if (cls < 0) continue;
++        if (cls < 0 || skipCls.has(cls)) continue;
+         let flags = 0; const round = jn === 'roundabout' || jn === 'circular';
+         if (cls !== RIVER) {
+           if (ow === '-1') { r.reverse(); flags |= 1; }
+@@ -137,6 +151,11 @@ export async function convertPbf(reader, name, onProgress) {
+   for (let i = 0; i < sorted.length; i++) if (i === 0 || sorted[i] !== sorted[i - 1]) sorted[N++] = sorted[i];
+   const needed = sorted.subarray(0, N); const X = new Uint32Array(N), Y = new Uint32Array(N); const have = new Uint8Array(N);
+   const find = (id) => { let lo = 0, hi = N - 1; while (lo <= hi) { const m = (lo + hi) >> 1; const v = needed[m]; if (v === id) return m; if (v < id) lo = m + 1; else hi = m - 1; } return -1; };
++  // the same for the corners of houses, kept apart so the road network stays small
++  const bSorted = bRefs.slice(0, nB).sort(); let NB = 0;
++  for (let i = 0; i < bSorted.length; i++) if (i === 0 || bSorted[i] !== bSorted[i - 1]) bSorted[NB++] = bSorted[i];
++  const bNeed = bSorted.subarray(0, NB); const BXn = new Uint32Array(NB), BYn = new Uint32Array(NB), bHave = new Uint8Array(NB);
++  const findB = (id) => { let lo = 0, hi = NB - 1; while (lo <= hi) { const m = (lo + hi) >> 1; const v = bNeed[m]; if (v === id) return m; if (v < id) lo = m + 1; else hi = m - 1; } return -1; };
+ 
+   // Pass 2: coordinates for those nodes, plus named places.
+   for await (const blk of blocks(reader, (f) => onProgress?.(0.45 + f * 0.45, 'Reading places'))) {
+@@ -155,12 +174,17 @@ export async function convertPbf(reader, name, onProgress) {
+         if (g.field === 2) {
+           const d = g.sub(); let ids = [], lats = [], lons = [], kv = [];
+           while (d.next()) { if (d.field === 1) ids = packed(d, true, true); else if (d.field === 8) lats = packed(d, true, true); else if (d.field === 9) lons = packed(d, true, true); else if (d.field === 10) kv = packed(d, false, false); else d.skip(); }
+-          let q = 0, hint = 0;
++          let q = 0, hint = 0, bh = 0;
+           for (let i = 0; i < ids.length; i++) {
+             const id = ids[i];
+             while (hint < N && needed[hint] < id) hint++;
+             const at = hint < N && needed[hint] === id ? hint : (hint > 0 && needed[hint - 1] > id ? find(id) : -1);
+             if (at >= 0) { const c = coord(lats[i], lons[i]); X[at] = c[0]; Y[at] = c[1]; have[at] = 1; }
++            if (NB) {
++              while (bh < NB && bNeed[bh] < id) bh++;
++              const bt = bh < NB && bNeed[bh] === id ? bh : (bh > 0 && bNeed[bh - 1] > id ? findB(id) : -1);
++              if (bt >= 0) { const c = coord(lats[i], lons[i]); BXn[bt] = c[0]; BYn[bt] = c[1]; bHave[bt] = 1; }
++            }
+             if (kv.length) {
+               const pairs = []; while (q < kv.length && kv[q] !== 0) { pairs.push([kv[q], kv[q + 1]]); q += 2; } q++;
+               if (pairs.length) { const p = tagged(pairs); if (p !== -1) { const c = coord(lats[i], lons[i]); places.push([p[0], p[1], c[0], c[1]]); } }
+@@ -171,6 +195,7 @@ export async function convertPbf(reader, name, onProgress) {
+           while (n.next()) { if (n.field === 1) id = n.svarint(); else if (n.field === 8) lat = n.svarint(); else if (n.field === 9) lon = n.svarint(); else if (n.field === 2) keys = packed(n, false, false); else if (n.field === 3) vals = packed(n, false, false); else n.skip(); }
+           const at = find(id); const c = coord(lat, lon);
+           if (at >= 0) { X[at] = c[0]; Y[at] = c[1]; have[at] = 1; }
++          if (NB) { const bt = findB(id); if (bt >= 0) { BXn[bt] = c[0]; BYn[bt] = c[1]; bHave[bt] = 1; } }
+           if (keys.length) { const p = tagged(keys.map((k, i) => [k, vals[i]])); if (p !== -1) places.push([p[0], p[1], c[0], c[1]]); }
+         } else g.skip();
+       }
+@@ -190,24 +215,93 @@ export async function convertPbf(reader, name, onProgress) {
+   }
+   for (const p of areaPois) { const at = find(p.ref); if (at >= 0 && have[at]) places.push([p.type, p.name, X[at], Y[at]]); }
+ 
++  let outN = N, oX = X, oY = Y, nodesOut = oNodes.subarray(0, o), startOut = Uint32Array.from(oStart);
++  if (opts.simplify > 0) {   // fewer points on each road, and only the points that roads use
++    const use = new Uint8Array(N); for (let i = 0; i < o; i++) if (use[oNodes[i]] < 2) use[oNodes[i]]++;
++    for (let w = 0; w < oClass.length; w++) { use[oNodes[oStart[w]]] = 2; use[oNodes[oStart[w + 1] - 1]] = 2; }
++    const keep = new Uint8Array(o); const stack = [];
++    for (let w = 0; w < oClass.length; w++) {
++      const a = oStart[w], b = oStart[w + 1] - 1; let s0 = a;
++      for (let i = a; i <= b; i++) {
++        if (use[oNodes[i]] < 2 && i !== b) continue;
++        keep[s0] = keep[i] = 1; stack.push(s0, i);
++        while (stack.length) {   // keep the point furthest from the straight line, then look again on each side
++          const j = stack.pop(), h = stack.pop(); if (j - h < 2) continue;
++          const ax = X[oNodes[h]], ay = Y[oNodes[h]], bx = X[oNodes[j]], by = Y[oNodes[j]], dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy) || 1;
++          const tol = opts.simplify / mPerUnit(ay); let far = -1, fd = tol;
++          for (let k = h + 1; k < j; k++) { const d = Math.abs((X[oNodes[k]] - ax) * dy - (Y[oNodes[k]] - ay) * dx) / L; if (d > fd) { fd = d; far = k; } }
++          if (far >= 0) { keep[far] = 1; stack.push(h, far, far, j); }
++        }
++        s0 = i;
++      }
++    }
++    const remap = new Int32Array(N).fill(-1); let nn = 0; const sOut = [0]; const tmp = new Uint32Array(o); let t2 = 0;
++    for (let w = 0; w < oClass.length; w++) { for (let i = oStart[w]; i < oStart[w + 1]; i++) if (keep[i]) { const n = oNodes[i]; if (remap[n] < 0) remap[n] = nn++; tmp[t2++] = remap[n]; } sOut.push(t2); }
++    oX = new Uint32Array(nn); oY = new Uint32Array(nn); for (let n = 0; n < N; n++) if (remap[n] >= 0) { oX[remap[n]] = X[n]; oY[remap[n]] = Y[n]; }
++    outN = nn; nodesOut = tmp.subarray(0, t2); startOut = Uint32Array.from(sOut);
++  }
++
+   let minX = TWO32, minY = TWO32, maxX = 0, maxY = 0;
+-  for (let i = 0; i < o; i++) { const n = oNodes[i]; if (X[n] < minX) minX = X[n]; if (X[n] > maxX) maxX = X[n]; if (Y[n] < minY) minY = Y[n]; if (Y[n] > maxY) maxY = Y[n]; }
+-  return encodeImap({ name, N, X, Y, W: oClass.length, wayStart: Uint32Array.from(oStart), wayNodes: oNodes.subarray(0, o), wayName: Uint32Array.from(oName), wayClass: Uint8Array.from(oClass), wayFlags: Uint8Array.from(oFlags), names, places, bbox: [minX, minY, maxX, maxY] });
++  for (let i = 0; i < nodesOut.length; i++) { const n = nodesOut[i]; if (oX[n] < minX) minX = oX[n]; if (oX[n] > maxX) maxX = oX[n]; if (oY[n] < minY) minY = oY[n]; if (oY[n] > maxY) maxY = oY[n]; }
++  const bbox = [minX, minY, maxX, maxY];
++  const houses = NB ? packBuildings(bRefs, bStartR, findB, BXn, BYn, bHave, bbox, opts.houseTol ?? 0.7) : null;
++  return encodeImap({ name, N: outN, X: oX, Y: oY, W: oClass.length, wayStart: startOut, wayNodes: nodesOut, wayName: Uint32Array.from(oName), wayClass: Uint8Array.from(oClass), wayFlags: Uint8Array.from(oFlags), names, places, bbox, houses });
++}
++
++// House outlines: first corner in full, the others as small steps from the corner before.
++function packBuildings(refs, starts, findB, BX, BY, have, bbox, tolM) {
++  const [bx0, by0, bx1, by1] = bbox, cw = Math.max(1, (bx1 - bx0 + 1) / BG), ch = Math.max(1, (by1 - by0 + 1) / BG);
++  const list = [];
++  for (let b = 0; b + 1 < starts.length; b++) {
++    const pts = []; let ok = true;
++    for (let i = starts[b]; i < starts[b + 1]; i++) { const k = findB(refs[i]); if (k < 0 || !have[k]) { ok = false; break; } pts.push(BX[k], BY[k]); }
++    if (!ok || pts.length < 6) continue;
++    if (tolM > 0 && pts.length > 8) {   // round huts and curved walls: keep only the corners that show the shape
++      const n = pts.length / 2, keep = new Uint8Array(n), tol = tolM / mPerUnit(pts[1]); let far = 0, fd = -1;
++      for (let i = 1; i < n; i++) { const d = Math.hypot(pts[i * 2] - pts[0], pts[i * 2 + 1] - pts[1]); if (d > fd) { fd = d; far = i; } }
++      keep[0] = keep[far] = 1; const st = [0, far, far, n];
++      while (st.length) {
++        const j = st.pop(), h = st.pop(); if (j - h < 2) continue; const jj = j % n;
++        const ax = pts[h * 2], ay = pts[h * 2 + 1], dx = pts[jj * 2] - ax, dy = pts[jj * 2 + 1] - ay, L = Math.hypot(dx, dy) || 1; let k = -1, kd = tol;
++        for (let i = h + 1; i < j; i++) { const d = Math.abs((pts[i * 2] - ax) * dy - (pts[i * 2 + 1] - ay) * dx) / L; if (d > kd) { kd = d; k = i; } }
++        if (k >= 0) { keep[k] = 1; st.push(h, k, k, j); }
++      }
++      const q = []; for (let i = 0; i < n; i++) if (keep[i]) q.push(pts[i * 2], pts[i * 2 + 1]);
++      if (q.length >= 6) pts.splice(0, pts.length, ...q);
++    }
++    const x = pts[0], y = pts[1]; if (x < bx0 || x > bx1 || y < by0 || y > by1) continue;
++    const d = []; let cx = x, cy = y;
++    for (let i = 2; i < pts.length; i += 2) {
++      const dx = Math.round((pts[i] - cx) / BQ), dy = Math.round((pts[i + 1] - cy) / BQ);
++      if (Math.abs(dx) > 32767 || Math.abs(dy) > 32767) { ok = false; break; } d.push(dx, dy); cx += dx * BQ; cy += dy * BQ;
++    }
++    if (!ok) continue;
++    list.push({ cell: Math.min(BG - 1, Math.floor((y - by0) / ch)) * BG + Math.min(BG - 1, Math.floor((x - bx0) / cw)), x, y, d });
++  }
++  list.sort((a, b) => a.cell - b.cell);
++  const B = list.length; let D = 0; for (const h of list) D += h.d.length / 2;
++  const ox = new Uint32Array(B), oy = new Uint32Array(B), start = new Uint32Array(B + 1), cell = new Uint32Array(BG * BG + 1), steps = new Int16Array(D * 2);
++  let q = 0;
++  list.forEach((h, i) => { ox[i] = h.x; oy[i] = h.y; steps.set(h.d, q * 2); q += h.d.length / 2; start[i + 1] = q; cell[h.cell + 1]++; });
++  for (let c = 0; c < BG * BG; c++) cell[c + 1] += cell[c];
++  return { B, D, ox, oy, start, cell, steps };
+ }
+ 
+ const pad4 = (n) => (n + 3) & ~3;
+ 
+ export function encodeImap(m) {
+-  const header = new TextEncoder().encode(JSON.stringify({ v: 1, name: m.name, built: new Date().toISOString().slice(0, 10), bbox: m.bbox, N: m.N, W: m.W, R: m.wayNodes.length, names: m.names, places: m.places }));
++  const hs = m.houses; const extra = hs ? { B: hs.B, BD: hs.D, BG, BQ } : {};
++  const header = new TextEncoder().encode(JSON.stringify({ v: 1, name: m.name, built: new Date().toISOString().slice(0, 10), bbox: m.bbox, N: m.N, W: m.W, R: m.wayNodes.length, ...extra, names: m.names, places: m.places }));
+   const hl = pad4(header.length); const R = m.wayNodes.length;
+-  const total = 12 + hl + 4 * (m.N * 2 + (m.W + 1) + R + m.W) + pad4(m.W) * 2;
++  const total = 12 + hl + 4 * (m.N * 2 + (m.W + 1) + R + m.W) + pad4(m.W) * 2 + (hs ? 4 * (hs.B * 3 + 1 + BG * BG + 1 + hs.D) : 0);
+   const buf = new ArrayBuffer(total); const u8 = new Uint8Array(buf); const dv = new DataView(buf);
+   u8.set([73, 77, 65, 80]); dv.setUint32(4, 1, true); dv.setUint32(8, hl, true); u8.set(header, 12);
+   for (let i = header.length; i < hl; i++) u8[12 + i] = 32;
+   let off = 12 + hl;
+   const put32 = (arr) => { new Uint32Array(buf, off, arr.length).set(arr); off += arr.length * 4; };
+   put32(m.X); put32(m.Y); put32(m.wayStart); put32(m.wayNodes); put32(m.wayName);
+-  u8.set(m.wayClass, off); off += pad4(m.W); u8.set(m.wayFlags, off);
++  u8.set(m.wayClass, off); off += pad4(m.W); u8.set(m.wayFlags, off); off += pad4(m.W);
++  if (hs) { put32(hs.ox); put32(hs.oy); put32(hs.start); put32(hs.cell); new Int16Array(buf, off, hs.D * 2).set(hs.steps); }
+   return buf;
+ }
+ 
+@@ -217,6 +311,8 @@ export function decodeImap(buf) {
+   const hl = dv.getUint32(8, true); const h = JSON.parse(new TextDecoder().decode(u8.subarray(12, 12 + hl)));
+   let off = 12 + hl; const get32 = (n) => { const a = new Uint32Array(buf, off, n); off += n * 4; return a; };
+   const X = get32(h.N), Y = get32(h.N), wayStart = get32(h.W + 1), wayNodes = get32(h.R), wayName = get32(h.W);
+-  const wayClass = new Uint8Array(buf, off, h.W); off += pad4(h.W); const wayFlags = new Uint8Array(buf, off, h.W);
+-  return { ...h, X, Y, wayStart, wayNodes, wayName, wayClass, wayFlags };
++  const wayClass = new Uint8Array(buf, off, h.W); off += pad4(h.W); const wayFlags = new Uint8Array(buf, off, h.W); off += pad4(h.W);
++  let houses = null;
++  if (h.B) houses = { B: h.B, G: h.BG, Q: h.BQ, ox: get32(h.B), oy: get32(h.B), start: get32(h.B + 1), cell: get32(h.BG * h.BG + 1), steps: new Int16Array(buf, off, h.BD * 2) };
++  return { ...h, X, Y, wayStart, wayNodes, wayName, wayClass, wayFlags, houses };
+ }
+diff --git a/internot-ai-v0.4/style.css b/internot-ai-v0.4/style.css
+index fe473bd..97461bb 100644
+--- a/internot-ai-v0.4/style.css
++++ b/internot-ai-v0.4/style.css
+@@ -148,6 +148,8 @@ a { color: var(--accent-deep); }
+ .map-search:has(ul:not([hidden])) #map-paste { height: 36px; }
+ .map-btns button.txt { font-size: 13px; font-weight: 600; }
+ .map-btns button.on { color: #2f6fde; }
++.map-btns button[hidden] { display: none; }
++#map-north span { display: inline-block; color: #c15f3c; }
+ .sheet-sub { display: block; font-weight: 400; font-size: 12px; color: var(--muted); }
+ .map-attrib { max-width: 72%; line-height: 1.25; }
+ 
+diff --git a/internot-ai-v0.4/sw.js b/internot-ai-v0.4/sw.js
+index 48967eb..b954209 100644
+--- a/internot-ai-v0.4/sw.js
++++ b/internot-ai-v0.4/sw.js
+@@ -1,6 +1,6 @@
+ // Internot AI service worker: makes the app open with no internet at all,
+ // and adds the two headers browsers need before they allow multi-threaded (fast) inference.
+-const VERSION = 'internot-v0.7.0';
++const VERSION = 'internot-v0.8.0';
+ const SHELL = ['./', './index.html', './style.css', './app.js', './maps.js', './mesh.js', './osmpbf.js', './map-worker.js', './lib/qrcode.js', './lib/jsqr.js', './world.json', './icon.svg', './icon-192.png', './icon-512.png', './manifest.webmanifest',
+   './lib/wllama/index.js', './lib/wllama/wllama.wasm'];
+ 
+diff --git a/internot-ai-v0.4/tools-build-map.mjs b/internot-ai-v0.4/tools-build-map.mjs
+index d45e1ce..490a7d0 100644
+--- a/internot-ai-v0.4/tools-build-map.mjs
++++ b/internot-ai-v0.4/tools-build-map.mjs
+@@ -1,13 +1,15 @@
+ #!/usr/bin/env node
+ // Optional: build a map file on a computer instead of on the phone.
+-//   node tools-build-map.mjs lesotho-latest.osm.pbf lesotho.imap "Lesotho"
++//   node tools-build-map.mjs lesotho-latest.osm.pbf lesotho.imap "Lesotho" [--buildings] [--skip service,track] [--simplify 2]
+ import { open, writeFile } from 'node:fs/promises';
+ import { convertPbf } from './osmpbf.js';
+-const [, , input, output, name = 'Map'] = process.argv;
+-if (!input || !output) { console.error('usage: node tools-build-map.mjs input.osm.pbf output.imap "Name"'); process.exit(1); }
++const args = process.argv.slice(2); const flag = (k) => { const i = args.indexOf(k); if (i < 0) return null; const v = args[i + 1]; args.splice(i, v && !v.startsWith('--') ? 2 : 1); return v && !v.startsWith('--') ? v : true; };
++const opts = { buildings: !!flag('--buildings') }; const sk = flag('--skip'); if (typeof sk === 'string') opts.skip = sk.split(','); const si = flag('--simplify'); if (si) opts.simplify = Number(si); const ht = flag('--house-simplify'); if (ht) opts.houseTol = Number(ht);
++const [input, output, name = 'Map'] = args;
++if (!input || !output) { console.error('usage: node tools-build-map.mjs input.osm.pbf output.imap "Name" [--buildings] [--skip service,track] [--simplify 2]'); process.exit(1); }
+ const fh = await open(input); const { size } = await fh.stat();
+ const reader = { size, read: async (o, n) => { const b = Buffer.alloc(n); await fh.read(b, 0, n, o); return new Uint8Array(b.buffer, b.byteOffset, n); } };
+ let last = '';
+-const buf = await convertPbf(reader, name, (f, label) => { const s = `${label} ${Math.round(f * 100)}%`; if (s !== last) { last = s; process.stdout.write('\r' + s + '   '); } });
++const buf = await convertPbf(reader, name, (f, label) => { const s = `${label} ${Math.round(f * 100)}%`; if (s !== last) { last = s; process.stdout.write('\r' + s + '   '); } }, opts);
+ await fh.close(); await writeFile(output, new Uint8Array(buf));
+ console.log(`\nWrote ${output} (${(buf.byteLength / 1048576).toFixed(1)} MB)`);
+diff --git a/internot-ai-v0.4/tools-fetch-sat.mjs b/internot-ai-v0.4/tools-fetch-sat.mjs
+index 009037d..e359e72 100644
+--- a/internot-ai-v0.4/tools-fetch-sat.mjs
++++ b/internot-ai-v0.4/tools-fetch-sat.mjs
+@@ -7,8 +7,8 @@ const [, , out, name = 'Lesotho', a = '26.9', b = '-30.75', c = '29.6', d = '-28
+ const box = [+a, +b, +c, +d], world = 4, max = +maxZ, TWO32 = 4294967296;
+ const lonToX = (lon) => Math.min(TWO32 - 1, Math.max(0, Math.round((lon + 180) / 360 * TWO32)));
+ const latToY = (lat) => { const s = Math.sin(lat * Math.PI / 180); return Math.min(TWO32 - 1, Math.max(0, Math.round((0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * TWO32))); };
+-// The 2016 pictures are free to share with credit (CC BY 4.0); later years are tried only if those are gone.
+-const LAYERS = [['s2cloudless_3857', '2016'], ['s2cloudless-2016_3857', '2016'], ['s2cloudless-2017_3857', '2017'], ['s2cloudless-2020_3857', '2020']];
++// Only the 2016 pictures: free to use with credit, also commercially (CC BY 4.0). Later years are non-commercial only, so they are never used.
++const LAYERS = [['s2cloudless_3857', '2016'], ['s2cloudless-2016_3857', '2016']];
+ let layer = LAYERS[0][0], year = LAYERS[0][1];
+ const url = (z, x, y) => `https://tiles.maps.eox.at/wmts/1.0.0/${layer}/default/g/${z}/${y}/${x}.jpg`;
+ const get = (u) => fetch(u, { signal: AbortSignal.timeout(20000), headers: { 'user-agent': 'internot-ai-build (open source offline map app)' } });
+diff --git a/render.yaml b/render.yaml
+new file mode 100644
+index 0000000..f8ada1d
+--- /dev/null
++++ b/render.yaml
+@@ -0,0 +1,19 @@
++# Render blueprint for the Internot AI server (free web service).
++# The database is Neon: paste its connection string as DATABASE_URL when Render asks.
++services:
++  - type: web
++    name: internot-server
++    runtime: node
++    plan: free
++    rootDir: server
++    buildCommand: npm install
++    startCommand: node server.js
++    healthCheckPath: /health
++    autoDeploy: true
++    envVars:
++      - key: DATABASE_URL
++        sync: false
++      - key: ADMIN_TOKEN
++        generateValue: true
++      - key: NODE_VERSION
++        value: "22"
+diff --git a/server/README.md b/server/README.md
+new file mode 100644
+index 0000000..b77901b
+--- /dev/null
++++ b/server/README.md
+@@ -0,0 +1,52 @@
++# Internot AI server
++
++A small server for the Internot AI app. It runs free on [Render](https://render.com) with a free [Neon](https://neon.tech) Postgres database.
++
++It does three things:
++
++- **Counts devices.** When the app is online it can send a random id it made for itself, plus the app version, platform (android, web), country code and language. No IP address, name, phone number, location or anything typed in the app is stored.
++- **Serves adverts.** You add adverts; the app fetches them when online and keeps them for offline use. The app can report how many times each advert was shown, so you can give sponsors a view count.
++- **Announces updates.** You set the newest version and a download link; the app can show "new version available".
++
++## Set up (about 10 minutes, free)
++
++1. **Neon:** sign up at neon.tech, create a project, and copy the connection string (it starts with `postgresql://` and ends with `?sslmode=require`).
++2. **Render:** sign up at render.com with your GitHub account. Choose **New → Blueprint**, pick the `internot-ai` repository, and Render reads `render.yaml`.
++3. When Render asks for `DATABASE_URL`, paste the Neon connection string. `ADMIN_TOKEN` is made for you; open the service's **Environment** tab to copy it. Keep it secret.
++4. Render builds and starts the server. Open `https://<your-service>.onrender.com/health`; it should say `{"ok":true,"db":true}`. The tables are created on first start.
++
++The free Render service sleeps after 15 minutes without visits, so the first request after a quiet spell takes up to a minute. The app should not wait for it.
++
++## API
++
++Public (the app):
++
++| Method and path | Body | Answer |
++| --- | --- | --- |
++| `POST /v1/ping` | `{"id":"<random id, 16-64 letters/digits/dashes>","version":"1.0","platform":"android","country":"LS","lang":"en","views":{"3":5}}` | `{"ok":true}` |
++| `GET /v1/content` | | `{"ads":[...],"update":{"version","url","notes"}}` |
++| `GET /health` | | `{"ok":true,"db":true}` |
++
++Admin (header `Authorization: Bearer <ADMIN_TOKEN>`):
++
++| Method and path | Body | What it does |
++| --- | --- | --- |
++| `GET /v1/stats` | | Devices in total, active in the last 1, 7 and 30 days, new this week, by platform, version and country, daily active devices for 30 days, advert views |
++| `GET /v1/ads` | | All adverts |
++| `POST /v1/ads` | `{"title","body","image_url","link_url","starts_at","ends_at","active"}` | Add an advert |
++| `PATCH /v1/ads/<id>` | any of the fields above | Change an advert |
++| `DELETE /v1/ads/<id>` | | Remove an advert |
++| `PUT /v1/update` | `{"version","url","notes"}` | Set the newest version |
++
++Example, from a computer:
++
++```
++curl -H "Authorization: Bearer $ADMIN_TOKEN" https://<your-service>.onrender.com/v1/stats
++curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "content-type: application/json" \
++  -d '{"title":"Pioneer Mall","body":"Open every day 8 to 6","link_url":"https://example.com"}' \
++  https://<your-service>.onrender.com/v1/ads
++```
++
++## Before the app sends anything
++
++The app does not talk to this server yet. Before it does, it should ask the user once ("Share an anonymous count? Yes / No") and work fully offline either way. Google Play's Data safety form and Apple's privacy label must then list the anonymous id and app version.
+diff --git a/server/package.json b/server/package.json
+new file mode 100644
+index 0000000..18e23ed
+--- /dev/null
++++ b/server/package.json
+@@ -0,0 +1,11 @@
++{
++  "name": "internot-server",
++  "version": "1.0.0",
++  "description": "Internot AI server: anonymous device counts, adverts and update notices. Runs on Render with a Neon Postgres database.",
++  "type": "module",
++  "main": "server.js",
++  "engines": { "node": ">=20" },
++  "scripts": { "start": "node server.js" },
++  "dependencies": { "pg": "^8.13.1" },
++  "license": "MIT"
++}
+diff --git a/server/server.js b/server/server.js
+new file mode 100644
+index 0000000..ac0d005
+--- /dev/null
++++ b/server/server.js
+@@ -0,0 +1,153 @@
++// Internot AI server — anonymous device counts, adverts and update notices.
++// Runs on Render (free web service) with a Neon Postgres database.
++//   DATABASE_URL  Neon connection string (postgresql://...?sslmode=require)
++//   ADMIN_TOKEN   long random secret for the admin endpoints
++//   PORT          set by Render
++// No IP addresses, names, phone numbers or locations are stored: only a random id the app makes for itself.
++import http from 'node:http';
++import pg from 'pg';
++
++const SCHEMA = `
++create table if not exists devices (
++  id text primary key, first_seen timestamptz not null default now(), last_seen timestamptz not null default now(),
++  app_version text, platform text, country text, lang text, pings integer not null default 1);
++create table if not exists daily_active (day date not null, device_id text not null, primary key (day, device_id));
++create table if not exists ads (
++  id serial primary key, title text not null, body text not null default '', image_url text, link_url text,
++  starts_at timestamptz, ends_at timestamptz, active boolean not null default true, created_at timestamptz not null default now());
++create table if not exists ad_views (day date not null, ad_id integer not null, views integer not null default 0, primary key (day, ad_id));
++create table if not exists app_update (id integer primary key, version text not null, url text, notes text, updated_at timestamptz not null default now());
++`;
++
++const ID = /^[A-Za-z0-9-]{16,64}$/;
++const short = (v, n = 40) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : null);
++const httpUrl = (v) => (typeof v === 'string' && /^https?:\/\/\S+$/i.test(v) ? v.slice(0, 500) : null);
++
++export function createServer(pool, { adminToken = process.env.ADMIN_TOKEN, now = () => new Date() } = {}) {
++  const q = (text, params) => pool.query(text, params);
++  const hits = new Map();   // requests per minute per caller, kept in memory only
++  const limited = (req) => {
++    const key = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0];
++    const minute = Math.floor(Date.now() / 60000); const h = hits.get(key);
++    if (!h || h.m !== minute) { hits.set(key, { m: minute, n: 1 }); if (hits.size > 5000) hits.clear(); return false; }
++    return ++h.n > 120;
++  };
++  const send = (res, code, body) => {
++    res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*',
++      'access-control-allow-headers': 'content-type, authorization', 'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS', 'cache-control': 'no-store' });
++    res.end(body === undefined ? '' : JSON.stringify(body));
++  };
++  const readBody = (req) => new Promise((ok, bad) => {
++    let size = 0; const parts = [];
++    req.on('data', (c) => { size += c.length; if (size <= 64 * 1024) parts.push(c); });
++    req.on('end', () => { if (size > 64 * 1024) return bad(Object.assign(new Error('too large'), { code: 413 })); if (!parts.length) return ok({}); try { ok(JSON.parse(Buffer.concat(parts).toString('utf8'))); } catch { bad(Object.assign(new Error('not JSON'), { code: 400 })); } });
++    req.on('error', bad);
++  });
++  const isAdmin = (req) => !!adminToken && adminToken.length >= 16 && req.headers.authorization === 'Bearer ' + adminToken;
++  const today = () => now().toISOString().slice(0, 10);
++
++  const routes = {
++    'GET /': async () => [200, { name: 'Internot AI server', ok: true }],
++    'GET /health': async () => { await q('select 1'); return [200, { ok: true, db: true }]; },
++
++    // The app, when online: "this phone has the app". Optional: how often each advert was shown since last time.
++    'POST /v1/ping': async (req, b) => {
++      if (!ID.test(String(b.id || ''))) return [400, { error: 'id must be the random id the app made (16-64 letters, digits or dashes)' }];
++      const v = [b.id, short(b.version, 20), short(b.platform, 20), short(b.country, 2)?.toUpperCase() || null, short(b.lang, 10)];
++      await q(`insert into devices (id, app_version, platform, country, lang) values ($1, $2, $3, $4, $5)
++               on conflict (id) do update set last_seen = now(), pings = devices.pings + 1,
++               app_version = coalesce($2, devices.app_version), platform = coalesce($3, devices.platform),
++               country = coalesce($4, devices.country), lang = coalesce($5, devices.lang)`, v);
++      await q('insert into daily_active (day, device_id) values ($1, $2) on conflict do nothing', [today(), b.id]);
++      if (b.views && typeof b.views === 'object') for (const [ad, n] of Object.entries(b.views).slice(0, 50)) {
++        const id = Number(ad), c = Math.min(10000, Math.max(0, Math.floor(Number(n) || 0))); if (!Number.isInteger(id) || id <= 0 || !c) continue;
++        await q('insert into ad_views (day, ad_id, views) values ($1, $2, $3) on conflict (day, ad_id) do update set views = ad_views.views + $3', [today(), id, c]);
++      }
++      return [200, { ok: true }];
++    },
++
++    // The app, when online: adverts to show (kept on the phone for offline use) and the newest version.
++    'GET /v1/content': async () => {
++      const ads = (await q(`select id, title, body, image_url, link_url, ends_at from ads where active
++                            and (starts_at is null or starts_at <= now()) and (ends_at is null or ends_at > now()) order by id desc limit 20`)).rows;
++      const up = (await q('select version, url, notes, updated_at from app_update where id = 1')).rows[0] || null;
++      return [200, { ads, update: up, fetched: now().toISOString() }];
++    },
++
++    // Admin: numbers for sponsors and funders.
++    'GET /v1/stats': async (req) => {
++      if (!isAdmin(req)) return [401, { error: 'admin token needed' }];
++      const one = async (sql, p) => (await q(sql, p)).rows;
++      const [tot] = await one(`select count(*)::int as devices,
++        count(*) filter (where last_seen > now() - interval '1 day')::int as active_1d,
++        count(*) filter (where last_seen > now() - interval '7 days')::int as active_7d,
++        count(*) filter (where last_seen > now() - interval '30 days')::int as active_30d,
++        count(*) filter (where first_seen > now() - interval '7 days')::int as new_7d from devices`);
++      return [200, {
++        ...tot,
++        by_platform: await one('select coalesce(platform, \'unknown\') as platform, count(*)::int as devices from devices group by 1 order by 2 desc'),
++        by_version: await one('select coalesce(app_version, \'unknown\') as version, count(*)::int as devices from devices group by 1 order by 2 desc limit 20'),
++        by_country: await one('select coalesce(country, \'??\') as country, count(*)::int as devices from devices group by 1 order by 2 desc limit 50'),
++        daily_active: await one("select to_char(day, 'YYYY-MM-DD') as day, count(*)::int as devices from daily_active where day > current_date - 30 group by 1 order by 1"),
++        ad_views: await one('select ad_id, sum(views)::int as views from ad_views group by 1 order by 1'),
++      }];
++    },
++
++    'GET /v1/ads': async (req) => (isAdmin(req) ? [200, { ads: (await q('select * from ads order by id desc')).rows }] : [401, { error: 'admin token needed' }]),
++    'POST /v1/ads': async (req, b) => {
++      if (!isAdmin(req)) return [401, { error: 'admin token needed' }];
++      const title = short(b.title, 80); if (!title) return [400, { error: 'title is required' }];
++      const r = await q(`insert into ads (title, body, image_url, link_url, starts_at, ends_at, active) values ($1, $2, $3, $4, $5, $6, $7) returning *`,
++        [title, short(b.body, 400) || '', httpUrl(b.image_url), httpUrl(b.link_url), b.starts_at || null, b.ends_at || null, b.active !== false]);
++      return [201, r.rows[0]];
++    },
++    'PUT /v1/update': async (req, b) => {
++      if (!isAdmin(req)) return [401, { error: 'admin token needed' }];
++      const version = short(b.version, 20); if (!version) return [400, { error: 'version is required' }];
++      const r = await q(`insert into app_update (id, version, url, notes) values (1, $1, $2, $3)
++                         on conflict (id) do update set version = $1, url = $2, notes = $3, updated_at = now() returning *`, [version, httpUrl(b.url), short(b.notes, 1000)]);
++      return [200, r.rows[0]];
++    },
++  };
++
++  const adRoute = async (method, id, req, b) => {   // PATCH or DELETE /v1/ads/:id
++    if (!isAdmin(req)) return [401, { error: 'admin token needed' }];
++    if (method === 'DELETE') { const r = await q('delete from ads where id = $1', [id]); return r.rowCount ? [200, { ok: true }] : [404, { error: 'no such advert' }]; }
++    const cur = (await q('select * from ads where id = $1', [id])).rows[0]; if (!cur) return [404, { error: 'no such advert' }];
++    const n = { ...cur };
++    if ('title' in b) n.title = short(b.title, 80) || cur.title; if ('body' in b) n.body = short(b.body, 400) || '';
++    if ('image_url' in b) n.image_url = httpUrl(b.image_url); if ('link_url' in b) n.link_url = httpUrl(b.link_url);
++    if ('starts_at' in b) n.starts_at = b.starts_at || null; if ('ends_at' in b) n.ends_at = b.ends_at || null; if ('active' in b) n.active = !!b.active;
++    const r = await q('update ads set title=$2, body=$3, image_url=$4, link_url=$5, starts_at=$6, ends_at=$7, active=$8 where id=$1 returning *',
++      [id, n.title, n.body, n.image_url, n.link_url, n.starts_at, n.ends_at, n.active]);
++    return [200, r.rows[0]];
++  };
++
++  return http.createServer(async (req, res) => {
++    try {
++      if (req.method === 'OPTIONS') return send(res, 204);
++      if (limited(req)) return send(res, 429, { error: 'too many requests, try again in a minute' });
++      const path = new URL(req.url, 'http://x').pathname.replace(/\/+$/, '') || '/';
++      const body = req.method === 'GET' ? {} : await readBody(req);
++      const m = /^\/v1\/ads\/(\d+)$/.exec(path);
++      const fn = routes[`${req.method} ${path}`];
++      const [code, out] = m && (req.method === 'PATCH' || req.method === 'DELETE') ? await adRoute(req.method, Number(m[1]), req, body)
++        : fn ? await fn(req, body) : [404, { error: 'not found' }];
++      send(res, code, out);
++    } catch (e) {
++      if (e.code === 413 || e.code === 400) return send(res, e.code, { error: e.message });
++      console.error(e); send(res, 500, { error: 'server error' });
++    }
++  });
++}
++
++export async function migrate(pool) { await pool.query(SCHEMA); }
++
++if (import.meta.url === `file://${process.argv[1]}`) {
++  if (!process.env.DATABASE_URL) { console.error('DATABASE_URL is not set (copy it from the Neon dashboard).'); process.exit(1); }
++  if (!process.env.ADMIN_TOKEN || process.env.ADMIN_TOKEN.length < 16) console.warn('ADMIN_TOKEN is missing or shorter than 16 characters: admin endpoints are switched off.');
++  const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: true }, max: 5, idleTimeoutMillis: 30000 });
++  await migrate(pool);
++  const port = Number(process.env.PORT) || 10000;
++  createServer(pool).listen(port, () => console.log(`Internot server listening on ${port}`));
++}
