@@ -436,6 +436,15 @@ async function registerSW() {
   window.internot = state; // handy when debugging
   initMaps(rootDir).catch((e) => console.error('maps failed to start', e));
   initMesh(rootDir, (n) => { const b = $('mesh-badge'); b.hidden = !n; b.textContent = n || ''; }).catch((e) => console.error('chat failed to start', e));
+  // Maps and models after install, sharing with no data, and the optional server (adverts, update notices, count).
+  const hooks = { BRAIN, rootDir, setStatus, unloadModel, importModel, native: () => !!state.native,
+    refreshModel: async () => { if (state.native) { try { state.modelMeta = (await BRAIN.info()).model || null; } catch {} } renderModel(); },
+    adoptModel: async (handle, name, size) => {   // web app: a finished download becomes the model, without copying it again
+      await unloadModel(); try { await rootDir.removeEntry(MODEL_FILE); } catch {}
+      if (handle.move) await handle.move(MODEL_FILE); else { const dst = await (await rootDir.getFileHandle(MODEL_FILE, { create: true })).createWritable(); await (await handle.getFile()).stream().pipeTo(dst); await rootDir.removeEntry(handle.name); }
+      state.modelMeta = { name, size }; state.sessionBlob = null; await writeJSON('model.json', state.modelMeta); renderModel(); } };
+  import('./packs.js').then((m) => m.initPacks(hooks)).catch((e) => console.error('downloads failed to start', e));
+  import('./online.js').then((m) => m.initOnline()).catch((e) => console.error('online features failed to start', e));
   registerSW();
   loader(null);
   setTimeout(warmUp, 300);

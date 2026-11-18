@@ -8,7 +8,7 @@ adb logcat -c
 adb shell am start -n org.internot.app/.MainActivity
 adb shell dumpsys package com.google.android.webview | grep -m1 versionName > test-out/webview.txt 2>&1 || true
 seen=0
-for i in $(seq 1 1000); do
+for i in $(seq 1 2600); do
   sleep 2
   adb logcat -d -v time 2>/dev/null | grep -E "INTERNOT-TEST|Capacitor.*(E/|rror)|AndroidRuntime|chromium.*(Uncaught|rror)" | cut -c1-1500 > test-out/report.txt
   n=$(grep -c "INTERNOT-TEST shot" test-out/report.txt)

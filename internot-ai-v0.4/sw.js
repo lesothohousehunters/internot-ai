@@ -1,7 +1,7 @@
 // Internot AI service worker: makes the app open with no internet at all,
 // and adds the two headers browsers need before they allow multi-threaded (fast) inference.
-const VERSION = 'internot-v0.8.0';
-const SHELL = ['./', './index.html', './style.css', './app.js', './maps.js', './mesh.js', './osmpbf.js', './map-worker.js', './lib/qrcode.js', './lib/jsqr.js', './world.json', './icon.svg', './icon-192.png', './icon-512.png', './manifest.webmanifest',
+const VERSION = 'internot-v0.9.0';
+const SHELL = ['./', './index.html', './style.css', './app.js', './maps.js', './mesh.js', './packs.js', './online.js', './osmpbf.js', './map-worker.js', './lib/qrcode.js', './lib/jsqr.js', './world.json', './icon.svg', './icon-192.png', './icon-512.png', './manifest.webmanifest',
   './lib/wllama/index.js', './lib/wllama/wllama.wasm'];
 
 self.addEventListener('install', (e) => {
@@ -26,6 +26,10 @@ self.addEventListener('fetch', (e) => {
   if (new URL(req.url).origin !== self.location.origin) return; // e.g. the one-time model download
   e.respondWith((async () => {
     const cache = await caches.open(VERSION);
+    if (/packs\.json$/.test(new URL(req.url).pathname)) {   // the list of maps and models: newest when online
+      try { const res = await fetch(req, { cache: 'no-store' }); if (res.ok) cache.put(req, res.clone()); return isolate(res); }
+      catch { const hit = await cache.match(req, { ignoreSearch: true }); return hit ? isolate(hit) : new Response('{}', { headers: { 'content-type': 'application/json' } }); }
+    }
     const hit = await cache.match(req, { ignoreSearch: true });
     if (hit) return isolate(hit);
     try {

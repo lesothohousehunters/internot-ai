@@ -11,6 +11,12 @@
     try { log('brain-info', await brainPlugin.info()); } catch (e) { log('brain-info', { error: String(e && e.message || e) }); }
     log('env', { ua: navigator.userAgent, isolated: self.crossOriginIsolated, webSpeech: 'speechSynthesis' in window, cores: navigator.hardwareConcurrency, memory: navigator.deviceMemory, jspi: 'Suspending' in WebAssembly, core: !!window.capacitorExports, plugins: (window.Capacitor?.PluginHeaders || []).map((h) => h.name) });
     await shot('first-launch');
+    // the anonymous-count question, asked once on first launch
+    for (let i = 0; i < 40 && document.getElementById('consent')?.hidden !== false; i++) await wait(500);
+    log('consent', { shown: document.getElementById('consent')?.hidden === false, text: (document.querySelector('#consent b') || {}).textContent });
+    await shot('consent');
+    document.getElementById('consent-no')?.click(); await wait(500);
+    log('consent-no', { choice: localStorage.getItem('countChoice'), id: localStorage.getItem('deviceId'), hidden: document.getElementById('consent').hidden });
     for (let i = 0; i < 600 && !(window.internot && window.internotMap && window.internotMap.map && window.internotMesh); i++) await wait(500);
     log('map', { name: internotMap.map?.name, stub: !!internotMap.map?.stub, roads: internotMap.map?.W, world: !!internotMap.world });
     const t1 = performance.now(); for (let i = 0; i < 600 && internot.modelMeta && !internot.loaded; i++) await wait(500);
@@ -74,6 +80,57 @@
     } catch (e) { log('docs', { error: String(e && e.stack || e) }); }
     await shot('docs');
     tab('model'); await shot('setup');
+    // maps and AI models after install
+    window.confirm = () => true; window.alert = () => {}; window.prompt = () => null;
+    const PK = window.internotPacks, Packs = window.capacitorExports.registerPlugin('Packs');
+    const ask = async (q) => { const t = performance.now(); let f = null; document.getElementById('input').value = q; document.getElementById('composer').requestSubmit();
+      for (let i = 0; i < 1500; i++) { await wait(400); const m = internot.messages.at(-1); if (f == null && m && m.role === 'assistant' && m.content) f = performance.now() - t; if (!internot.generating && i > 2) break; }
+      return { q, firstWordMs: f == null ? null : Math.round(f), totalMs: Math.round(performance.now() - t), answer: (internot.messages.at(-1)?.content || '').slice(0, 400), stats: internot.lastStats || null }; };
+    log('packs', { list: PK.allPacks().map((p) => [p.id, p.size, !!p.sha256, p.url && p.url.slice(0, 60)]), device: PK.P.device, suggested: PK.suggested(), have: [...PK.P.have.keys()] });
+    document.getElementById('pack-list').scrollIntoView(); await shot('setup-packs');
+    { const m = PK.allPacks().find((p) => p.id === 'map-lesotho'); const t = performance.now(); await PK.get(m);
+      const i = await Packs.info(); const got = (i.maps || []).find((x) => x.file === 'lesotho.imap'); let head = null;
+      if (got) { const b = await (await fetch(window.Capacitor.convertFileSrc(got.path))).arrayBuffer(); head = [String.fromCharCode(...new Uint8Array(b, 0, 4)), b.byteLength]; }
+      log('map-download', { ms: Math.round(performance.now() - t), status: document.getElementById('pack-status').textContent, saved: got || null, read: head }); }
+    const small = PK.allPacks().find((p) => p.id === 'model-small');
+    if (small) {
+      const t = performance.now(); const g = PK.get(small); let paused = false;
+      for (let i = 0; i < 1200; i++) { await wait(250); const j = PK.P.jobs.get(small.id); if (j && j.done > small.size * 0.3) { PK.pause(small); paused = true; break; } if (!j && i > 8) break; }
+      await g; const part = (await Packs.partial({ file: small.file })).bytes;
+      log('model-pause', { paused, part, of: small.size, status: document.getElementById('pack-status').textContent });
+      document.getElementById('pack-list').scrollIntoView(); await shot('setup-paused');
+      await PK.get(small);
+      log('model-resume', { ms: Math.round(performance.now() - t), status: document.getElementById('pack-status').textContent, model: internot.modelMeta });
+      tab('chat'); log('chat-small', await ask('What is the capital of Lesotho?'));
+      tab('model'); await wait(500);
+    }
+    const large = PK.allPacks().find((p) => p.id === 'model-large');
+    if (large) {
+      const t = performance.now(); await PK.get(large);
+      log('model-large', { ms: Math.round(performance.now() - t), status: document.getElementById('pack-status').textContent, model: internot.modelMeta });
+      tab('chat'); internot.messages = [];
+      log('chat-large-1', await ask('What is the capital of Lesotho?'));
+      log('chat-large-2', await ask('What is the highest mountain in Lesotho?'));
+      log('chat-large-3', await ask('Which country surrounds Lesotho?'));
+      await shot('brain-large');
+    }
+    // the anonymous count and the server (not online yet during the test)
+    window.internotOnline.decide('yes');
+    log('count', { choice: localStorage.getItem('countChoice'), idLength: (localStorage.getItem('deviceId') || '').length, ping: await window.internotOnline.ping(true), content: await window.internotOnline.fetchContent(true) });
+    window.internotOnline.decide('no');
+    localStorage.setItem('content', JSON.stringify({ ads: [{ id: 1, title: 'Maluti Lodge', body: 'Rooms from M450 a night. Show this app for 10% off.', link_url: 'https://example.com' }] }));
+    tab('chat'); window.internotOnline.showNotice(); await wait(500);
+    log('advert', { shown: !document.getElementById('notice').hidden, text: document.getElementById('notice').textContent });
+    await shot('advert');
+    localStorage.setItem('content', JSON.stringify({ update: { version: '9.9.9', notes: 'Faster maps.', url: 'https://example.com' } })); window.internotOnline.showNotice(); await wait(300);
+    log('update', { text: document.getElementById('notice').textContent }); await shot('update-notice');
+    localStorage.removeItem('content'); window.internotOnline.showNotice();
+    // sharing with no data
+    try { log('peers', await window.capacitorExports.registerPlugin('Nearby').peers()); } catch (e) { log('peers', { error: String(e && e.message || e) }); }
+    try { log('share-path', await Packs.pathFor({ what: 'map', file: 'botswana.imap' })); } catch (e) { log('share-path', { error: String(e && e.message || e) }); }
+    tab('model'); await wait(300); document.getElementById('share-app').click(); await wait(8000);
+    log('share', { status: document.getElementById('share-status').textContent });
+    await shot('share-sheet');
   } catch (e) { log('failed', String(e && e.stack || e)); }
   log('done', 1);
 })();

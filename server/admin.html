@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Internot AI · Admin</title>
+<style>
+:root { --bg:#f0eee6; --panel:#faf9f5; --panel2:#e8e4d8; --line:#d9d4c4; --text:#1f1e1d; --muted:#6b6860; --accent:#d97757; --deep:#c15f3c; --danger:#b3402e; --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif; }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+header { display:flex; align-items:center; gap:10px; padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:2; }
+header b { font-family:var(--serif); font-size:20px; } header span { color:var(--muted); }
+nav { display:flex; gap:4px; flex-wrap:wrap; margin-left:auto; }
+nav button { background:none; border:0; padding:8px 12px; border-radius:8px; color:var(--muted); font:inherit; cursor:pointer; }
+nav button.on { background:var(--accent); color:#fff; }
+main { max-width:1000px; margin:0 auto; padding:20px; }
+h2 { font-family:var(--serif); font-weight:600; margin:6px 0 14px; }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:14px; }
+.kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:14px; }
+.kpi { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px; }
+.kpi small { color:var(--muted); display:block; } .kpi b { font-size:28px; font-family:var(--serif); }
+.bars { display:flex; align-items:flex-end; gap:3px; height:160px; padding-top:8px; }
+.bars div { flex:1; background:var(--accent); border-radius:4px 4px 0 0; min-height:2px; position:relative; }
+.bars div:hover::after { content:attr(data-tip); position:absolute; bottom:100%; left:50%; transform:translateX(-50%); background:var(--text); color:#fff; padding:3px 7px; border-radius:6px; font-size:12px; white-space:nowrap; }
+.axis { display:flex; justify-content:space-between; color:var(--muted); font-size:12px; margin-top:4px; }
+table { width:100%; border-collapse:collapse; } th, td { text-align:left; padding:7px 6px; border-bottom:1px solid var(--line); vertical-align:top; } th { color:var(--muted); font-weight:500; font-size:13px; }
+td.n { text-align:right; font-variant-numeric:tabular-nums; }
+.row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px; }
+input, select, textarea { font:inherit; padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:#fff; min-width:0; }
+textarea { width:100%; }
+.grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:8px; }
+.grid2 label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--muted); }
+button.p, button.s, button.d { font:inherit; border:0; border-radius:8px; padding:8px 14px; cursor:pointer; }
+button.p { background:var(--accent); color:#fff; } button.p:hover { background:var(--deep); } button.s { background:var(--panel2); color:var(--text); } button.d { background:none; color:var(--danger); padding:4px 6px; }
+.hint { color:var(--muted); font-size:13px; } .err { color:var(--danger); }
+.codes { font-family:ui-monospace,Menlo,Consolas,monospace; white-space:pre-wrap; background:#fff; border:1px solid var(--line); border-radius:8px; padding:10px; }
+[hidden] { display:none !important; }
+#report .head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; }
+#report h1 { font-family:var(--serif); margin:0; font-size:26px; }
+@media print { header, .noprint, nav { display:none !important; } body { background:#fff; } main { padding:0; } .card, .kpi { border-color:#ccc; } section:not(#tab-report) { display:none !important; } }
+</style>
+</head>
+<body>
+<header><b>Internot AI</b><span>admin</span>
+  <nav id="nav" hidden><button data-t="numbers" class="on">Numbers</button><button data-t="ads">Adverts</button><button data-t="report">Sponsor report</button><button data-t="packs">Paid packs</button><button data-t="update">Update notice</button><button class="s" id="logout">Sign out</button></nav>
+</header>
+<main>
+  <section id="login" class="card">
+    <h2>Sign in</h2>
+    <p class="hint">Paste the ADMIN_TOKEN from the Render dashboard (Environment). It stays in this browser tab only.</p>
+    <div class="row"><input id="token" type="password" placeholder="Admin token" style="flex:1"><button class="p" id="go">Open</button></div>
+    <p id="login-err" class="err"></p>
+  </section>
+
+  <section id="tab-numbers" hidden>
+    <div class="kpis" id="kpis"></div>
+    <div class="card"><h2>Phones using the app each day</h2><p class="hint">Phones that said Yes to the anonymous count and were online that day. Phones that said No are not counted anywhere.</p><div class="bars" id="daily"></div><div class="axis" id="daily-axis"></div></div>
+    <div class="grid2">
+      <div class="card"><h2>Countries</h2><table id="countries"></table><p class="hint">From each phone's language and region setting.</p></div>
+      <div class="card"><h2>Versions and platforms</h2><table id="versions"></table></div>
+    </div>
+  </section>
+
+  <section id="tab-ads" hidden>
+    <div class="card"><h2>New advert</h2>
+      <div class="grid2"><label>Title<input id="ad-title" maxlength="80"></label><label>Link (optional)<input id="ad-link" placeholder="https://"></label>
+        <label>Picture address (optional)<input id="ad-image" placeholder="https://"></label><label>Starts (optional)<input id="ad-start" type="date"></label><label>Ends (optional)<input id="ad-end" type="date"></label></div>
+      <label class="hint">Text<textarea id="ad-body" rows="2" maxlength="400"></textarea></label>
+      <div class="row"><button class="p" id="ad-add">Add advert</button><span id="ad-msg" class="hint"></span></div></div>
+    <div class="card"><h2>Adverts</h2><table id="ads"></table></div>
+  </section>
+
+  <section id="tab-report" hidden>
+    <div class="card noprint"><div class="row"><select id="rep-ad"></select><button class="p" onclick="print()">Print or save as PDF</button></div><p class="hint">A one-page report for a sponsor. In the print window choose “Save as PDF” to send it by email or WhatsApp.</p></div>
+    <div class="card" id="report"></div>
+  </section>
+
+  <section id="tab-packs" hidden>
+    <div class="card"><h2>Paid pack</h2><p class="hint">A map or AI model people unlock with a code after paying you (M-Pesa, EcoCash or cash). The app lists it with its price; the address below is only given out after a code is accepted.</p>
+      <div class="grid2"><label>Id (small letters, digits, dashes)<input id="pk-id" placeholder="map-lesotho-tourism"></label><label>Kind<select id="pk-kind"><option value="map">Map</option><option value="model">AI model</option></select></label>
+        <label>Name<input id="pk-name"></label><label>Price shown in the app<input id="pk-price" placeholder="M50"></label>
+        <label>Download address<input id="pk-url" placeholder="https://"></label><label>Size in bytes<input id="pk-size" inputmode="numeric"></label>
+        <label>SHA-256 (64 letters and digits)<input id="pk-sha"></label><label>Shown in the app<select id="pk-active"><option value="1">Yes</option><option value="0">No</option></select></label></div>
+      <div class="row"><button class="p" id="pk-save">Save pack</button><span id="pk-msg" class="hint"></span></div></div>
+    <div class="card"><h2>Packs</h2><table id="packs"></table></div>
+    <div class="card"><h2>Unlock codes</h2>
+      <div class="row"><select id="cd-pack"></select><label class="hint">How many <input id="cd-count" type="number" min="1" max="500" value="10" style="width:80px"></label><label class="hint">Phones per code <input id="cd-uses" type="number" min="1" max="10" value="1" style="width:70px"></label><input id="cd-note" placeholder="Note, e.g. Sold at Maseru Mall"><button class="p" id="cd-make">Make codes</button></div>
+      <div id="cd-new" class="codes" hidden></div>
+      <table id="codes" style="margin-top:10px"></table></div>
+  </section>
+
+  <section id="tab-update" hidden>
+    <div class="card"><h2>Update notice</h2><p class="hint">Phones with an older version see this once they are online.</p>
+      <div class="grid2"><label>Newest version<input id="up-version" placeholder="0.9.1"></label><label>Where to get it<input id="up-url" placeholder="https://"></label></div>
+      <label class="hint">What is new<textarea id="up-notes" rows="2" maxlength="1000"></textarea></label>
+      <div class="row"><button class="p" id="up-save">Save</button><span id="up-msg" class="hint"></span></div></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const num = (n) => Number(n || 0).toLocaleString();
+const fmtSize = (b) => !b ? '' : b >= 1073741824 ? (b / 1073741824).toFixed(2) + ' GB' : Math.round(b / 1048576) + ' MB';
+let token = sessionStorage.getItem('adminToken') || '', S = null, ADS = [], PACKS = [];
+async function api(path, method = 'GET', body) {
+  const r = await fetch(path, { method, headers: { authorization: 'Bearer ' + token, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error || 'error ' + r.status); return j;
+}
+function tab(t) { document.querySelectorAll('#nav button[data-t]').forEach((b) => b.classList.toggle('on', b.dataset.t === t)); document.querySelectorAll('main > section[id^=tab-]').forEach((s) => (s.hidden = s.id !== 'tab-' + t)); if (t === 'report') report(); }
+document.querySelectorAll('#nav button[data-t]').forEach((b) => (b.onclick = () => tab(b.dataset.t)));
+$('logout').onclick = () => { sessionStorage.removeItem('adminToken'); location.reload(); };
+$('go').onclick = async () => { token = $('token').value.trim(); try { await load(); sessionStorage.setItem('adminToken', token); } catch (e) { $('login-err').textContent = e.message === 'admin token needed' ? 'That token is not right.' : e.message; } };
+$('token').onkeydown = (e) => { if (e.key === 'Enter') $('go').click(); };
+
+async function load() {
+  [S, { ads: ADS }, { packs: PACKS }] = await Promise.all([api('/v1/stats'), api('/v1/ads'), api('/v1/packs')]);
+  $('login').hidden = true; $('nav').hidden = false; if (document.querySelector('main > section[id^=tab-]:not([hidden])') == null) tab('numbers');
+  numbers(); ads(); packs();
+  const u = (await (await fetch('/v1/content')).json()).update; if (u) { $('up-version').value = u.version; $('up-url').value = u.url || ''; $('up-notes').value = u.notes || ''; }
+}
+function days(n) { const out = []; const d = new Date(); for (let i = n - 1; i >= 0; i--) { const x = new Date(d); x.setUTCDate(d.getUTCDate() - i); out.push(x.toISOString().slice(0, 10)); } return out; }
+function bars(el, axis, series) {
+  const max = Math.max(1, ...series.map((s) => s[1])); el.innerHTML = series.map(([d, v]) => `<div style="height:${(v / max) * 100}%" data-tip="${esc(d)}: ${num(v)}"></div>`).join('');
+  axis.innerHTML = `<span>${esc(series[0][0])}</span><span>${esc(series.at(-1)[0])}</span>`;
+}
+function numbers() {
+  $('kpis').innerHTML = [['Phones counted', S.devices], ['Active today', S.active_1d], ['Active this week', S.active_7d], ['Active this month', S.active_30d], ['New this week', S.new_7d]].map(([k, v]) => `<div class="kpi"><small>${k}</small><b>${num(v)}</b></div>`).join('');
+  const m = new Map(S.daily_active.map((r) => [r.day, r.devices])); bars($('daily'), $('daily-axis'), days(30).map((d) => [d, m.get(d) || 0]));
+  $('countries').innerHTML = '<tr><th>Country</th><th class="n">Phones</th></tr>' + S.by_country.map((r) => `<tr><td>${esc(r.country)}</td><td class="n">${num(r.devices)}</td></tr>`).join('');
+  $('versions').innerHTML = '<tr><th>Version</th><th class="n">Phones</th></tr>' + S.by_version.map((r) => `<tr><td>${esc(r.version)}</td><td class="n">${num(r.devices)}</td></tr>`).join('')
+    + '<tr><th>Platform</th><th class="n">Phones</th></tr>' + S.by_platform.map((r) => `<tr><td>${esc(r.platform)}</td><td class="n">${num(r.devices)}</td></tr>`).join('');
+}
+const views = (id) => (S.ad_views.find((v) => v.ad_id === id) || {}).views || 0;
+function ads() {
+  $('ads').innerHTML = '<tr><th>Advert</th><th>Runs</th><th class="n">Views</th><th>Shown</th><th></th></tr>' + ADS.map((a) => `<tr><td><b>${esc(a.title)}</b><br><span class="hint">${esc(a.body)}</span>${a.link_url ? `<br><a href="${esc(a.link_url)}" target="_blank" rel="noopener">${esc(a.link_url)}</a>` : ''}</td>
+    <td class="hint">${a.starts_at ? esc(a.starts_at.slice(0, 10)) : 'now'} to ${a.ends_at ? esc(a.ends_at.slice(0, 10)) : 'no end'}</td><td class="n">${num(views(a.id))}</td>
+    <td><button class="s" data-toggle="${a.id}">${a.active ? 'On' : 'Off'}</button></td><td><button class="d" data-del="${a.id}">Delete</button></td></tr>`).join('');
+  $('ads').querySelectorAll('[data-toggle]').forEach((b) => (b.onclick = async () => { const a = ADS.find((x) => x.id == b.dataset.toggle); await api('/v1/ads/' + a.id, 'PATCH', { active: !a.active }); await load(); }));
+  $('ads').querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => { if (!confirm('Delete this advert?')) return; await api('/v1/ads/' + b.dataset.del, 'DELETE'); await load(); }));
+  $('rep-ad').innerHTML = ADS.map((a) => `<option value="${a.id}">${esc(a.title)}</option>`).join('');
+}
+$('ad-add').onclick = async () => {
+  try { await api('/v1/ads', 'POST', { title: $('ad-title').value, body: $('ad-body').value, link_url: $('ad-link').value || null, image_url: $('ad-image').value || null, starts_at: $('ad-start').value || null, ends_at: $('ad-end').value || null });
+    ['ad-title', 'ad-body', 'ad-link', 'ad-image', 'ad-start', 'ad-end'].forEach((i) => ($(i).value = '')); $('ad-msg').textContent = 'Added.'; await load(); } catch (e) { $('ad-msg').textContent = e.message; }
+};
+function report() {
+  const a = ADS.find((x) => x.id == $('rep-ad').value); const el = $('report'); if (!a) { el.innerHTML = '<p class="hint">Add an advert first.</p>'; return; }
+  const rows = S.ad_views_daily.filter((r) => r.ad_id === a.id); const m = new Map(rows.map((r) => [r.day, r.views])); const ds = days(30).map((d) => [d, m.get(d) || 0]);
+  const last30 = ds.reduce((n, d) => n + d[1], 0);
+  el.innerHTML = `<div class="head"><div><span class="hint">Sponsor report · Internot AI</span><h1>${esc(a.title)}</h1><p class="hint">${esc(a.body)}</p></div><div class="hint">${new Date().toISOString().slice(0, 10)}</div></div>
+    <div class="kpis"><div class="kpi"><small>Times shown, all time</small><b>${num(views(a.id))}</b></div><div class="kpi"><small>Times shown, last 30 days</small><b>${num(last30)}</b></div><div class="kpi"><small>Phones using the app this month</small><b>${num(S.active_30d)}</b></div><div class="kpi"><small>Countries</small><b>${num(S.by_country.length)}</b></div></div>
+    <h2>Times shown each day</h2><div class="bars" id="rep-bars"></div><div class="axis" id="rep-axis"></div>
+    <p class="hint">Counted on phones whose owners agreed to share an anonymous count; the real number of views is higher. Counts reach the server when phones go online. No personal data is collected.</p>`;
+  bars($('rep-bars'), $('rep-axis'), ds);
+}
+$('rep-ad').onchange = report;
+function packs() {
+  $('packs').innerHTML = '<tr><th>Pack</th><th>Price</th><th class="n">Unlocked</th><th class="n">Codes left</th><th>Shown</th><th></th></tr>' + PACKS.map((p) => { const s = (S.packs_sold || []).find((x) => x.id === p.id) || {};
+    return `<tr><td><b>${esc(p.name)}</b><br><span class="hint">${esc(p.id)} · ${esc(p.kind)} · ${fmtSize(p.size)}</span></td><td>${esc(p.price || '')}</td><td class="n">${num(s.unlocked)}</td><td class="n">${num(s.codes_left)}</td><td>${p.active ? 'Yes' : 'No'}</td>
+    <td><button class="s" data-edit="${esc(p.id)}">Edit</button> <button class="d" data-delp="${esc(p.id)}">Delete</button></td></tr>`; }).join('');
+  $('packs').querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => { const p = PACKS.find((x) => x.id === b.dataset.edit); $('pk-id').value = p.id; $('pk-kind').value = p.kind; $('pk-name').value = p.name; $('pk-price').value = p.price || ''; $('pk-url').value = p.url; $('pk-size').value = p.size || ''; $('pk-sha').value = p.sha256 || ''; $('pk-active').value = p.active ? '1' : '0'; scrollTo(0, 0); }));
+  $('packs').querySelectorAll('[data-delp]').forEach((b) => (b.onclick = async () => { if (!confirm('Delete this pack and all its codes?')) return; await api('/v1/packs/' + encodeURIComponent(b.dataset.delp), 'DELETE'); await load(); }));
+  $('cd-pack').innerHTML = PACKS.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+  codes();
+}
+$('pk-save').onclick = async () => {
+  try { await api('/v1/packs/' + encodeURIComponent($('pk-id').value.trim()), 'PUT', { kind: $('pk-kind').value, name: $('pk-name').value, price: $('pk-price').value, url: $('pk-url').value, size: $('pk-size').value, sha256: $('pk-sha').value.trim(), active: $('pk-active').value === '1' });
+    $('pk-msg').textContent = 'Saved.'; await load(); } catch (e) { $('pk-msg').textContent = e.message; }
+};
+async function codes() {
+  const p = $('cd-pack').value; if (!p) { $('codes').innerHTML = ''; return; }
+  const { codes } = await api('/v1/codes?pack=' + encodeURIComponent(p));
+  $('codes').innerHTML = '<tr><th>Code</th><th class="n">Used</th><th class="n">Left</th><th>Note</th><th>Made</th></tr>' + codes.map((c) => `<tr><td><code>${esc(c.code)}</code></td><td class="n">${c.used}</td><td class="n">${c.uses_left}</td><td>${esc(c.note || '')}</td><td class="hint">${esc(String(c.created_at).slice(0, 10))}</td></tr>`).join('');
+}
+$('cd-pack').onchange = codes;
+$('cd-make').onclick = async () => {
+  try { const r = await api('/v1/codes', 'POST', { pack: $('cd-pack').value, count: $('cd-count').value, uses: $('cd-uses').value, note: $('cd-note').value });
+    $('cd-new').hidden = false; $('cd-new').textContent = 'New codes (copy them now):\n' + r.codes.join('\n'); await load(); } catch (e) { $('cd-new').hidden = false; $('cd-new').textContent = e.message; }
+};
+$('up-save').onclick = async () => { try { await api('/v1/update', 'PUT', { version: $('up-version').value, url: $('up-url').value || null, notes: $('up-notes').value }); $('up-msg').textContent = 'Saved.'; } catch (e) { $('up-msg').textContent = e.message; } };
+if (token) load().catch(() => { sessionStorage.removeItem('adminToken'); token = ''; });
+</script>
+</body>
+</html>

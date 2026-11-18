@@ -22,8 +22,15 @@
 </header>
 
 <main>
+  <div id="consent" class="overlay" hidden><div class="card">
+    <b>Share an anonymous count?</b>
+    <p class="hint">When this phone is online, Internot AI can tell our server “one more phone uses the app”, with the app version and how often each advert was shown. A random number stands for this phone. No name, phone number, contacts or location are sent. This helps us find sponsors and keep the app free.</p>
+    <p class="hint">Everything works the same if you say No. You can change this any time under Setup → Settings.</p>
+    <div class="row wrap"><button id="consent-yes" type="button" class="primary">Yes, share</button><button id="consent-no" type="button">No</button></div>
+  </div></div>
   <!-- CHAT -->
   <section id="view-chat" class="view active" aria-label="Chat">
+    <div id="notice" class="notice" role="status" hidden></div>
     <div id="messages" class="messages" aria-live="polite"></div>
     <form id="composer" class="composer">
       <label class="doc-toggle" title="Answer from your saved documents">
@@ -131,6 +138,7 @@
       <label><input type="checkbox" id="set-cool"> <span><b>Cool‑down pauses</b><small>Rest 2 seconds after every block of text to limit heat and battery wear. Answers take longer.</small></span></label>
       <label><input type="checkbox" id="set-unload"> <span><b>Free memory when I leave</b><small>Unload the model one minute after the app goes to the background.</small></span></label>
       <label><input type="checkbox" id="set-gpu"> <span><b>Use graphics chip (experimental)</b><small>Faster on some phones, unstable on others. Applies next time the model loads.</small></span></label>
+      <label><input type="checkbox" id="set-count"> <span><b>Share an anonymous count</b><small>When online, tell the Internot server that one more phone uses the app. No name, number or location.</small></span></label>
       <label class="stack"><span><b>Longest answer</b><small>In tokens (roughly ¾ of a word each).</small></span>
         <select id="set-max"><option>128</option><option>256</option><option>512</option><option>1024</option></select></label>
       <label class="stack"><span><b>Instructions for The Brain</b></span>
@@ -151,6 +159,21 @@
       <p id="map-error" class="hint err"></p>
       <details><summary>Where to get other countries</summary><p class="hint">On Wi‑Fi, open <a href="https://download.geofabrik.de/" target="_blank" rel="noopener">download.geofabrik.de</a>, choose a country and download the file ending in <code>.osm.pbf</code>. Then tap “Add a country map file” and choose it. Map data © OpenStreetMap contributors. World map: Natural Earth.</p></details>
       <div class="row wrap"><label id="map-replace" class="button" hidden>Replace map<input id="map-file-2" type="file" accept=".pbf,.imap,application/octet-stream" hidden></label><button id="map-delete" type="button" class="danger" hidden>Delete map</button></div></div>
+
+    <h2>Get maps and models</h2>
+    <div class="card"><div id="pack-device" class="model-info"></div>
+      <ul id="pack-list" class="list packs"></ul>
+      <div class="row wrap"><button id="pack-import" type="button">Import a file</button><input id="pack-import-file" type="file" accept=".gguf,.imap,.pbf,application/octet-stream" hidden></div>
+      <p id="pack-status" class="hint" role="status"></p>
+      <p class="hint">A download that stops carries on from where it stopped; keep the app open while it runs. Each file is checked before it is used. The same files are on the <a href="https://lesothohousehunters.github.io/internot-ai/downloads.html" target="_blank" rel="noopener">downloads page</a>. A file from there, a memory card, a USB stick or another phone goes in with “Import a file”.</p></div>
+
+    <h2>Share with no data</h2>
+    <div class="card"><p class="hint">Send the app, this map or the AI model to a phone nearby. In the list that opens, choose Quick Share (Nearby Share) or Bluetooth. No data or airtime is used.</p>
+      <div class="row wrap"><button id="share-app" type="button">Share the app</button><button id="share-map" type="button">Share this map</button><button id="share-model" type="button">Share the AI model</button></div>
+      <div id="share-nearby-box" hidden><p class="hint">Or send straight to a phone linked in Chat. Both phones: Chat → Find nearby phones.</p>
+        <div class="row wrap"><select id="share-what" aria-label="What to send"><option value="map">This map</option><option value="model">The AI model</option></select><button id="share-peers-btn" type="button">Send to a linked phone</button></div>
+        <ul id="share-peers" class="list"></ul></div>
+      <p id="share-status" class="hint" role="status"></p></div>
   </section>
 </main>
 

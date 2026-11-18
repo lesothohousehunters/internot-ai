@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Download Internot AI, maps and AI models</title>
+<meta name="description" content="Internot AI works with no internet. Download the app, country maps and AI models once, then use them offline.">
+<meta name="theme-color" content="#f0eee6">
+<link rel="icon" href="internot-ai-v0.4/icon.svg" type="image/svg+xml">
+<style>
+:root { --bg:#f0eee6; --panel:#faf9f5; --panel2:#e8e4d8; --line:#d9d4c4; --text:#1f1e1d; --muted:#6b6860; --accent:#d97757; --deep:#c15f3c; --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+header { max-width:880px; margin:0 auto; padding:28px 20px 8px; display:flex; align-items:center; gap:12px; }
+header b { font-family:var(--serif); font-size:24px; }
+main { max-width:880px; margin:0 auto; padding:0 20px 40px; }
+h1 { font-family:var(--serif); font-weight:600; font-size:34px; line-height:1.15; margin:10px 0 8px; }
+h2 { font-family:var(--serif); font-weight:600; font-size:24px; margin:34px 0 10px; }
+.lead { color:var(--muted); font-size:18px; margin:0 0 6px; }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:16px; margin-bottom:12px; }
+.item { display:flex; gap:14px; align-items:center; justify-content:space-between; flex-wrap:wrap; }
+.item .t { flex:1; min-width:230px; } .item b { font-size:17px; } .item small { display:block; color:var(--muted); }
+.tag { display:inline-block; background:var(--panel2); border-radius:99px; padding:1px 9px; font-size:12px; color:var(--muted); margin-left:6px; vertical-align:2px; }
+.tag.on { background:var(--accent); color:#fff; }
+a.btn { display:inline-block; background:var(--accent); color:#fff; text-decoration:none; padding:10px 18px; border-radius:12px; font-weight:600; white-space:nowrap; }
+a.btn:hover { background:var(--deep); } a.btn.s { background:var(--panel2); color:var(--text); }
+a { color:var(--deep); }
+code, .sha { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; word-break:break-all; color:var(--muted); }
+ol, ul { padding-left:22px; } li { margin:4px 0; }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:12px; }
+.grid .card h3 { margin:0 0 6px; font-size:17px; }
+table { width:100%; border-collapse:collapse; } th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); } th { color:var(--muted); font-weight:500; font-size:14px; }
+.note { color:var(--muted); font-size:14px; }
+footer { max-width:880px; margin:0 auto; padding:20px; color:var(--muted); font-size:13px; border-top:1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <svg viewBox="0 0 512 512" width="40" height="40" aria-hidden="true"><mask id="m"><rect width="512" height="512" fill="#fff"/><rect x="206" width="100" height="512" fill="#000"/></mask><g mask="url(#m)" fill="none" stroke="#d97757" stroke-width="42" stroke-linecap="round"><path d="M72 241A240 240 0 0 1 440 241"/><path d="M130 289A165 165 0 0 1 382 289"/><path d="M187 337A90 90 0 0 1 325 337"/></g><g fill="#d97757"><rect x="228" y="100" width="56" height="236" rx="28"/><circle cx="256" cy="396" r="33"/></g></svg>
+  <b>Internot AI</b>
+</header>
+<main>
+  <h1>Download once. Use it with no internet.</h1>
+  <p class="lead">An AI assistant, street maps with directions, phone-to-phone chat and a document reader that all run on the phone. Get the files here once over Wi‑Fi, or from a friend’s phone, and you never need data for them again.</p>
+  <p class="note">This page will move to internot.maclesotho.com.</p>
+
+  <h2>1. Get the app</h2>
+  <div id="apps"></div>
+  <div class="grid">
+    <div class="card"><h3>Android phone</h3><ol><li>Download the light app above (best on low data).</li><li>Open the file. If Android asks, allow installing from this source.</li><li>Open Internot AI → Setup → <b>Get maps and models</b>.</li></ol></div>
+    <div class="card"><h3>iPhone, iPad or computer</h3><ol><li>Open the browser version above once while online.</li><li>iPhone: Share → <b>Add to Home Screen</b>. Computer: install it from the address bar.</li><li>It then opens with no internet. Add maps and a model under Setup.</li></ol></div>
+  </div>
+
+  <h2>2. Choose an AI model for your phone</h2>
+  <p>Bigger models answer more accurately but need more memory and are slower. Not sure how much memory your phone has? The app tells you under Setup → Get maps and models and marks the one that suits it.</p>
+  <div id="models"></div>
+  <p class="note">The AI can still be wrong. Check anything important. All three models are free to use, including commercially (Apache 2.0 licence). They are downloaded from Hugging Face.</p>
+
+  <h2>3. Country maps</h2>
+  <p>Every street, village, clinic and school, with turn-by-turn directions. The Lesotho map also shows over a million house outlines.</p>
+  <div id="maps"></div>
+  <p class="note">Map data © OpenStreetMap contributors, available under the Open Database License. Another country? Download its <code>.osm.pbf</code> file from <a href="https://download.geofabrik.de/" target="_blank" rel="noopener">download.geofabrik.de</a> and add it in the app under Setup → Maps.</p>
+
+  <h2>4. Put a file into the app</h2>
+  <div class="card"><ol>
+    <li><b>Easiest:</b> in the app, Setup → Get maps and models → <b>Get</b>. A download that stops carries on from where it stopped.</li>
+    <li><b>From this page, a memory card, a USB stick or WhatsApp:</b> in the app, Setup → <b>Import a file</b>, then choose the <code>.imap</code> map or <code>.gguf</code> model.</li>
+  </ol></div>
+
+  <h2>5. Share with no data</h2>
+  <div class="grid">
+    <div class="card"><h3>Quick Share or Bluetooth</h3><p>In the app: Setup → Share with no data → <b>Share the app</b>, <b>Share this map</b> or <b>Share the AI model</b>, then pick Quick Share (Nearby Share) or Bluetooth. Quick Share is fast; Bluetooth is slow for big files.</p></div>
+    <div class="card"><h3>Straight between two Internot phones</h3><p>On both phones open Chat → <b>Find nearby phones</b>. Then Setup → Share with no data → <b>Send to a linked phone</b>. The other phone is asked before anything is sent.</p></div>
+    <div class="card"><h3>Shops and offices</h3><p>A laptop with these files can copy them to phones by USB cable or memory card, with no internet at all.</p></div>
+  </div>
+
+  <h2>Check a file</h2>
+  <p class="note">The app checks every download itself. If you copy files another way and want to check them on a computer, each file’s SHA‑256 is listed above. On Windows: <code>certutil -hashfile FILE SHA256</code>. On Mac or Linux: <code>shasum -a 256 FILE</code>.</p>
+</main>
+<footer>Internot AI is made by RFE Labs and released under the MIT licence. Maps © OpenStreetMap contributors (ODbL). Satellite pictures: Sentinel‑2 cloudless 2016 by EOX IT Services GmbH (contains modified Copernicus Sentinel data 2016 &amp; 2017). World map: Natural Earth. AI models: Qwen (Apache 2.0).</footer>
+<script>
+const fmt = (b) => !b ? '' : b >= 1073741824 ? (b / 1073741824).toFixed(2) + ' GB' : Math.max(1, Math.round(b / 1048576)) + ' MB';
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const ram = navigator.deviceMemory;
+const item = (p, btn) => `<div class="card item"><div class="t"><b>${esc(p.name)}</b>${p.tag || ''}<small>${esc(p.sub || '')}</small>${p.sha256 ? `<div class="sha">SHA-256 ${esc(p.sha256)}</div>` : ''}</div>${btn}</div>`;
+fetch('internot-ai-v0.4/packs.json', { cache: 'no-store' }).then((r) => r.json()).then((c) => {
+  document.getElementById('apps').innerHTML = (c.apps || []).map((a, i) => item({ name: a.name, sub: a.note, tag: i === 0 ? '<span class="tag on">Start here</span>' : '' }, `<a class="btn${i ? ' s' : ''}" href="${esc(a.url)}">${a.id === 'app-web' ? 'Open' : 'Download'}</a>`)).join('');
+  const fit = (c.models || []).filter((m) => !ram || ram >= m.ram * 0.9).sort((a, b) => b.ram - a.ram)[0];
+  document.getElementById('models').innerHTML = (c.models || []).map((m) => item({ name: `${m.tier} · ${m.name}`, sha256: m.sha256,
+    sub: [fmt(m.size), `for phones with ${m.ram} GB of memory or more`, m.note, m.nativeOnly ? 'Android app only' : ''].filter(Boolean).join(' · '),
+    tag: fit && fit.id === m.id ? '<span class="tag on">Suits this device</span>' : '' }, `<a class="btn s" href="${esc(m.url)}" download>Download</a>`)).join('');
+  document.getElementById('maps').innerHTML = (c.maps || []).map((m) => item({ name: m.name, sha256: m.sha256,
+    sub: `${fmt(m.size)}${m.houses ? ' · ' + Number(m.houses).toLocaleString() + ' houses' : ''}${m.built ? ' · map data from ' + m.built : ''}` }, `<a class="btn s" href="${esc(m.url)}" download>Download</a>`)).join('');
+}).catch(() => { document.getElementById('apps').innerHTML = '<div class="card"><a class="btn" href="https://github.com/lesothohousehunters/internot-ai/releases/latest">Get the Android app</a></div>'; });
+</script>
+</body>
+</html>

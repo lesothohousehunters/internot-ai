@@ -107,10 +107,14 @@ function setProgress(frac, label) {
 // Ready-made country maps that ship with the app (inside the Android app, or beside the web app).
 // maps/list.json names them; without it there is only Lesotho.
 let BUILT_INS = [{ file: 'lesotho.imap', name: 'Lesotho' }];
-const builtInList = fetch('./maps/list.json').then((r) => (r.ok ? r.json() : null)).then((l) => { if (Array.isArray(l) && l.length) BUILT_INS = l; }, () => {});
-const chosen = () => { let f = null; try { f = localStorage.getItem('builtInMap'); } catch {} return BUILT_INS.find((b) => b.file === f) || BUILT_INS[0]; };
-const builtInUrl = (b = chosen()) => './maps/' + b.file;
 const NATIVE = !!window.Capacitor;
+// Maps downloaded, imported or received later (Android app) are read in place from the app's storage.
+const packMap = (m) => ({ file: m.file, name: m.name, bbox: m.bbox, houses: m.houses || 0, mb: m.mb, url: window.Capacitor.convertFileSrc(m.path) });
+export function addMaps(list) { for (const m of list || []) { const e = packMap(m), i = BUILT_INS.findIndex((b) => b.file === e.file); if (i < 0) BUILT_INS.push(e); else if (BUILT_INS[i].url) BUILT_INS[i] = e; } renderMapInfo(); }
+const builtInList = fetch('./maps/list.json').then((r) => (r.ok ? r.json() : null)).then((l) => { if (Array.isArray(l) && l.length) BUILT_INS = l; }, () => {})
+  .then(async () => { const P = NATIVE ? window.capacitorExports?.registerPlugin?.('Packs') : null; if (P) try { const i = await P.info(); for (const m of i.maps || []) if (!BUILT_INS.some((b) => b.file === m.file)) BUILT_INS.push(packMap(m)); } catch (e) { console.warn('downloaded maps unreadable', e); } });
+const chosen = () => { let f = null; try { f = localStorage.getItem('builtInMap'); } catch {} return BUILT_INS.find((b) => b.file === f) || BUILT_INS[0]; };
+const builtInUrl = (b = chosen()) => b.url || './maps/' + b.file;
 const TTS = NATIVE ? window.capacitorExports?.registerPlugin?.('TextToSpeech') : null;
 let builtIn = null;
 function builtInAvailable() { return builtIn ||= fetch(builtInUrl(BUILT_INS[0]), { method: 'HEAD' }).then((r) => r.ok && !/html/.test(r.headers.get('content-type') || ''), () => false); }
@@ -144,7 +148,7 @@ async function getBuiltIn() {   // web app: one download, then kept on the devic
 }
 const niceName = (file) => { const b = file.replace(/\.(osm\.pbf|pbf|imap)$/i, '').replace(/-latest$|-\d{6}$/, '').replace(/[-_]+/g, ' ').trim(); return b ? b[0].toUpperCase() + b.slice(1) : 'Map'; };
 
-async function importMap(file) {
+export async function importMap(file) {
   $('map-error').textContent = ''; try { localStorage.removeItem('builtInMap'); } catch {} M.builtIn = null;
   try {
     let buf; const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
@@ -777,6 +781,6 @@ export async function initMaps(root) {
   loadWorld(); satInit(); let sat = false; try { sat = !!localStorage.getItem('mapSat'); } catch {} if (sat) setSat(true);
   renderMapInfo();
 }
-M.api = { parseLocation, setSat, SAT, makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint, switchBuiltIn, builtIns: () => BUILT_INS };
+M.api = { parseLocation, setSat, SAT, makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint, switchBuiltIn, builtIns: () => BUILT_INS, current: () => M.builtIn, addMaps, removeMap: (file) => { BUILT_INS = BUILT_INS.filter((b) => b.file !== file); renderMapInfo(); } };
 M.api.speakTest = async (text) => { if (!TTS) return { native: false, web: 'speechSynthesis' in window }; const l = await TTS.getSupportedLanguages().catch((e) => ({ error: String(e) })); const said = await Promise.race([TTS.speak({ text, lang: 'en-US' }).then(() => 'spoken', (e) => 'failed: ' + (e?.message || e)), new Promise((r) => setTimeout(() => r('timeout'), 9000))]); return { native: true, languages: l.languages ? l.languages.length : l, said }; };
 export const mapShown = () => resize();

@@ -1,11 +1,16 @@
-// Internot AI server — anonymous device counts, adverts and update notices.
+// Internot AI server — anonymous device counts, adverts, update notices, paid packs with unlock codes,
+// and an admin page (/admin) with the numbers for sponsors.
 // Runs on Render (free web service) with a Neon Postgres database.
 //   DATABASE_URL  Neon connection string (postgresql://...?sslmode=require)
 //   ADMIN_TOKEN   long random secret for the admin endpoints
 //   PORT          set by Render
 // No IP addresses, names, phone numbers or locations are stored: only a random id the app makes for itself.
 import http from 'node:http';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import pg from 'pg';
+
+const ADMIN_PAGE = fs.readFileSync(new URL('./admin.html', import.meta.url));
 
 const SCHEMA = `
 create table if not exists devices (
@@ -17,10 +22,21 @@ create table if not exists ads (
   starts_at timestamptz, ends_at timestamptz, active boolean not null default true, created_at timestamptz not null default now());
 create table if not exists ad_views (day date not null, ad_id integer not null, views integer not null default 0, primary key (day, ad_id));
 create table if not exists app_update (id integer primary key, version text not null, url text, notes text, updated_at timestamptz not null default now());
+create table if not exists packs (
+  id text primary key, kind text not null, name text not null, price text, url text not null, sha256 text, size bigint,
+  active boolean not null default true, created_at timestamptz not null default now());
+create table if not exists codes (
+  code text primary key, pack_id text not null references packs(id) on delete cascade, uses_left integer not null default 1,
+  used integer not null default 0, note text, created_at timestamptz not null default now(), last_used timestamptz);
 `;
 
 const ID = /^[A-Za-z0-9-]{16,64}$/;
 const short = (v, n = 40) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : null);
+const PACK_ID = /^[a-z0-9-]{2,40}$/;
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';   // no 0/O or 1/I, easy to read out over the phone
+const normCode = (v) => String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 32);
+const newCode = () => { const b = crypto.randomBytes(12); let s = ''; for (let i = 0; i < 12; i++) s += CODE_CHARS[b[i] % 32]; return s; };
+const showCode = (c) => c.replace(/(.{4})(?=.)/g, '$1-');
 const httpUrl = (v) => (typeof v === 'string' && /^https?:\/\/\S+$/i.test(v) ? v.slice(0, 500) : null);
 
 export function createServer(pool, { adminToken = process.env.ADMIN_TOKEN, now = () => new Date() } = {}) {
@@ -32,7 +48,8 @@ export function createServer(pool, { adminToken = process.env.ADMIN_TOKEN, now =
     if (!h || h.m !== minute) { hits.set(key, { m: minute, n: 1 }); if (hits.size > 5000) hits.clear(); return false; }
     return ++h.n > 120;
   };
-  const send = (res, code, body) => {
+  const send = (res, code, body, type) => {
+    if (type) { res.writeHead(code, { 'content-type': type, 'cache-control': 'no-store', 'x-frame-options': 'DENY' }); return res.end(body); }
     res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*',
       'access-control-allow-headers': 'content-type, authorization', 'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS', 'cache-control': 'no-store' });
     res.end(body === undefined ? '' : JSON.stringify(body));
@@ -71,7 +88,22 @@ export function createServer(pool, { adminToken = process.env.ADMIN_TOKEN, now =
       const ads = (await q(`select id, title, body, image_url, link_url, ends_at from ads where active
                             and (starts_at is null or starts_at <= now()) and (ends_at is null or ends_at > now()) order by id desc limit 20`)).rows;
       const up = (await q('select version, url, notes, updated_at from app_update where id = 1')).rows[0] || null;
-      return [200, { ads, update: up, fetched: now().toISOString() }];
+      const packs = (await q(`select id, kind, name, price, size from packs where active order by kind, name`)).rows.map((p) => ({ ...p, size: p.size == null ? null : Number(p.size) }));
+      return [200, { ads, update: up, packs, fetched: now().toISOString() }];
+    },
+
+    // The app: an unlock code bought for a paid pack. Gives the download address once the code checks out.
+    'POST /v1/redeem': async (req, b) => {
+      const code = normCode(b.code), pack = String(b.pack || '');
+      if (code.length < 8 || !PACK_ID.test(pack)) return [400, { error: 'code and pack are needed' }];
+      const r = await q(`update codes set uses_left = uses_left - 1, used = used + 1, last_used = now()
+                         where code = $1 and pack_id = $2 and uses_left > 0 returning pack_id`, [code, pack]);
+      if (!r.rowCount) {
+        const known = (await q('select 1 from codes where code = $1 and pack_id = $2', [code, pack])).rowCount;
+        return known ? [409, { error: 'this code has already been used' }] : [404, { error: 'unknown code' }];
+      }
+      const p = (await q('select id, kind, name, url, sha256, size from packs where id = $1', [pack])).rows[0];
+      return [200, { ...p, size: p.size == null ? null : Number(p.size) }];
     },
 
     // Admin: numbers for sponsors and funders.
@@ -90,6 +122,8 @@ export function createServer(pool, { adminToken = process.env.ADMIN_TOKEN, now =
         by_country: await one('select coalesce(country, \'??\') as country, count(*)::int as devices from devices group by 1 order by 2 desc limit 50'),
         daily_active: await one("select to_char(day, 'YYYY-MM-DD') as day, count(*)::int as devices from daily_active where day > current_date - 30 group by 1 order by 1"),
         ad_views: await one('select ad_id, sum(views)::int as views from ad_views group by 1 order by 1'),
+        ad_views_daily: await one("select ad_id, to_char(day, 'YYYY-MM-DD') as day, views from ad_views where day > current_date - 60 order by 1, 2"),
+        packs_sold: await one('select p.id, p.name, p.price, coalesce(sum(c.used), 0)::int as unlocked, coalesce(sum(c.uses_left), 0)::int as codes_left from packs p left join codes c on c.pack_id = p.id group by 1, 2, 3 order by 1'),
       }];
     },
 
@@ -101,6 +135,22 @@ export function createServer(pool, { adminToken = process.env.ADMIN_TOKEN, now =
         [title, short(b.body, 400) || '', httpUrl(b.image_url), httpUrl(b.link_url), b.starts_at || null, b.ends_at || null, b.active !== false]);
       return [201, r.rows[0]];
     },
+    'GET /v1/packs': async (req) => (isAdmin(req) ? [200, { packs: (await q('select * from packs order by kind, id')).rows.map((p) => ({ ...p, size: p.size == null ? null : Number(p.size) })) }] : [401, { error: 'admin token needed' }]),
+    'POST /v1/codes': async (req, b) => {
+      if (!isAdmin(req)) return [401, { error: 'admin token needed' }];
+      const pack = String(b.pack || ''); const count = Math.min(500, Math.max(1, Math.floor(Number(b.count) || 1))); const uses = Math.min(10, Math.max(1, Math.floor(Number(b.uses) || 1)));
+      if (!(await q('select 1 from packs where id = $1', [pack])).rowCount) return [404, { error: 'no such pack' }];
+      const out = [];
+      while (out.length < count) { const c = newCode(); const r = await q('insert into codes (code, pack_id, uses_left, note) values ($1, $2, $3, $4) on conflict do nothing', [c, pack, uses, short(b.note, 80)]); if (r.rowCount) out.push(showCode(c)); }
+      return [201, { pack, uses, codes: out }];
+    },
+    'GET /v1/codes': async (req) => {
+      if (!isAdmin(req)) return [401, { error: 'admin token needed' }];
+      const pack = new URL(req.url, 'http://x').searchParams.get('pack');
+      const r = await q(`select code, pack_id, uses_left, used, note, created_at, last_used from codes ${pack ? 'where pack_id = $1' : ''} order by created_at desc limit 1000`, pack ? [pack] : []);
+      return [200, { codes: r.rows.map((c) => ({ ...c, code: showCode(c.code) })) }];
+    },
+    'GET /admin': async () => [200, ADMIN_PAGE, 'text/html; charset=utf-8'],
     'PUT /v1/update': async (req, b) => {
       if (!isAdmin(req)) return [401, { error: 'admin token needed' }];
       const version = short(b.version, 20); if (!version) return [400, { error: 'version is required' }];
@@ -108,6 +158,20 @@ export function createServer(pool, { adminToken = process.env.ADMIN_TOKEN, now =
                          on conflict (id) do update set version = $1, url = $2, notes = $3, updated_at = now() returning *`, [version, httpUrl(b.url), short(b.notes, 1000)]);
       return [200, r.rows[0]];
     },
+  };
+
+  const packRoute = async (method, id, req, b) => {   // PUT or DELETE /v1/packs/:id
+    if (!isAdmin(req)) return [401, { error: 'admin token needed' }];
+    if (!PACK_ID.test(id)) return [400, { error: 'pack id: 2-40 small letters, digits or dashes' }];
+    if (method === 'DELETE') { const r = await q('delete from packs where id = $1', [id]); return r.rowCount ? [200, { ok: true }] : [404, { error: 'no such pack' }]; }
+    const kind = b.kind === 'model' || b.kind === 'map' ? b.kind : null; const name = short(b.name, 80); const url = httpUrl(b.url);
+    if (!kind || !name || !url) return [400, { error: 'kind (model or map), name and url are required' }];
+    const sha = typeof b.sha256 === 'string' && /^[0-9a-fA-F]{64}$/.test(b.sha256) ? b.sha256.toLowerCase() : null;
+    const size = Number.isFinite(Number(b.size)) && Number(b.size) > 0 ? Math.floor(Number(b.size)) : null;
+    const r = await q(`insert into packs (id, kind, name, price, url, sha256, size, active) values ($1, $2, $3, $4, $5, $6, $7, $8)
+                       on conflict (id) do update set kind = $2, name = $3, price = $4, url = $5, sha256 = $6, size = $7, active = $8 returning *`,
+      [id, kind, name, short(b.price, 20), url, sha, size, b.active !== false]);
+    return [200, { ...r.rows[0], size: r.rows[0].size == null ? null : Number(r.rows[0].size) }];
   };
 
   const adRoute = async (method, id, req, b) => {   // PATCH or DELETE /v1/ads/:id
@@ -129,11 +193,12 @@ export function createServer(pool, { adminToken = process.env.ADMIN_TOKEN, now =
       if (limited(req)) return send(res, 429, { error: 'too many requests, try again in a minute' });
       const path = new URL(req.url, 'http://x').pathname.replace(/\/+$/, '') || '/';
       const body = req.method === 'GET' ? {} : await readBody(req);
-      const m = /^\/v1\/ads\/(\d+)$/.exec(path);
+      const m = /^\/v1\/ads\/(\d+)$/.exec(path), pm = /^\/v1\/packs\/([^/]+)$/.exec(path);
       const fn = routes[`${req.method} ${path}`];
-      const [code, out] = m && (req.method === 'PATCH' || req.method === 'DELETE') ? await adRoute(req.method, Number(m[1]), req, body)
+      const [code, out, type] = m && (req.method === 'PATCH' || req.method === 'DELETE') ? await adRoute(req.method, Number(m[1]), req, body)
+        : pm && (req.method === 'PUT' || req.method === 'DELETE') ? await packRoute(req.method, decodeURIComponent(pm[1]), req, body)
         : fn ? await fn(req, body) : [404, { error: 'not found' }];
-      send(res, code, out);
+      send(res, code, out, type);
     } catch (e) {
       if (e.code === 413 || e.code === 400) return send(res, e.code, { error: e.message });
       console.error(e); send(res, 500, { error: 'server error' });
