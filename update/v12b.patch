@@ -1,0 +1,529 @@
+diff --git a/internot-ai-v0.4/app.js b/internot-ai-v0.4/app.js
+index 273f46c..2d3f0aa 100644
+--- a/internot-ai-v0.4/app.js
++++ b/internot-ai-v0.4/app.js
+@@ -436,6 +436,15 @@ async function registerSW() {
+   window.internot = state; // handy when debugging
+   initMaps(rootDir).catch((e) => console.error('maps failed to start', e));
+   initMesh(rootDir, (n) => { const b = $('mesh-badge'); b.hidden = !n; b.textContent = n || ''; }).catch((e) => console.error('chat failed to start', e));
++  // Maps and models after install, sharing with no data, and the optional server (adverts, update notices, count).
++  const hooks = { BRAIN, rootDir, setStatus, unloadModel, importModel, native: () => !!state.native,
++    refreshModel: async () => { if (state.native) { try { state.modelMeta = (await BRAIN.info()).model || null; } catch {} } renderModel(); },
++    adoptModel: async (handle, name, size) => {   // web app: a finished download becomes the model, without copying it again
++      await unloadModel(); try { await rootDir.removeEntry(MODEL_FILE); } catch {}
++      if (handle.move) await handle.move(MODEL_FILE); else { const dst = await (await rootDir.getFileHandle(MODEL_FILE, { create: true })).createWritable(); await (await handle.getFile()).stream().pipeTo(dst); await rootDir.removeEntry(handle.name); }
++      state.modelMeta = { name, size }; state.sessionBlob = null; await writeJSON('model.json', state.modelMeta); renderModel(); } };
++  import('./packs.js').then((m) => m.initPacks(hooks)).catch((e) => console.error('downloads failed to start', e));
++  import('./online.js').then((m) => m.initOnline()).catch((e) => console.error('online features failed to start', e));
+   registerSW();
+   loader(null);
+   setTimeout(warmUp, 300);
+diff --git a/internot-ai-v0.4/index.html b/internot-ai-v0.4/index.html
+index 49ad0de..28b19b8 100644
+--- a/internot-ai-v0.4/index.html
++++ b/internot-ai-v0.4/index.html
+@@ -22,8 +22,15 @@
+ </header>
+ 
+ <main>
++  <div id="consent" class="overlay" hidden><div class="card">
++    <b>Share an anonymous count?</b>
++    <p class="hint">When this phone is online, Internot AI can tell our server “one more phone uses the app”, with the app version and how often each advert was shown. A random number stands for this phone. No name, phone number, contacts or location are sent. This helps us find sponsors and keep the app free.</p>
++    <p class="hint">Everything works the same if you say No. You can change this any time under Setup → Settings.</p>
++    <div class="row wrap"><button id="consent-yes" type="button" class="primary">Yes, share</button><button id="consent-no" type="button">No</button></div>
++  </div></div>
+   <!-- CHAT -->
+   <section id="view-chat" class="view active" aria-label="Chat">
++    <div id="notice" class="notice" role="status" hidden></div>
+     <div id="messages" class="messages" aria-live="polite"></div>
+     <form id="composer" class="composer">
+       <label class="doc-toggle" title="Answer from your saved documents">
+@@ -131,6 +138,7 @@
+       <label><input type="checkbox" id="set-cool"> <span><b>Cool‑down pauses</b><small>Rest 2 seconds after every block of text to limit heat and battery wear. Answers take longer.</small></span></label>
+       <label><input type="checkbox" id="set-unload"> <span><b>Free memory when I leave</b><small>Unload the model one minute after the app goes to the background.</small></span></label>
+       <label><input type="checkbox" id="set-gpu"> <span><b>Use graphics chip (experimental)</b><small>Faster on some phones, unstable on others. Applies next time the model loads.</small></span></label>
++      <label><input type="checkbox" id="set-count"> <span><b>Share an anonymous count</b><small>When online, tell the Internot server that one more phone uses the app. No name, number or location.</small></span></label>
+       <label class="stack"><span><b>Longest answer</b><small>In tokens (roughly ¾ of a word each).</small></span>
+         <select id="set-max"><option>128</option><option>256</option><option>512</option><option>1024</option></select></label>
+       <label class="stack"><span><b>Instructions for The Brain</b></span>
+@@ -151,6 +159,21 @@
+       <p id="map-error" class="hint err"></p>
+       <details><summary>Where to get other countries</summary><p class="hint">On Wi‑Fi, open <a href="https://download.geofabrik.de/" target="_blank" rel="noopener">download.geofabrik.de</a>, choose a country and download the file ending in <code>.osm.pbf</code>. Then tap “Add a country map file” and choose it. Map data © OpenStreetMap contributors. World map: Natural Earth.</p></details>
+       <div class="row wrap"><label id="map-replace" class="button" hidden>Replace map<input id="map-file-2" type="file" accept=".pbf,.imap,application/octet-stream" hidden></label><button id="map-delete" type="button" class="danger" hidden>Delete map</button></div></div>
++
++    <h2>Get maps and models</h2>
++    <div class="card"><div id="pack-device" class="model-info"></div>
++      <ul id="pack-list" class="list packs"></ul>
++      <div class="row wrap"><button id="pack-import" type="button">Import a file</button><input id="pack-import-file" type="file" accept=".gguf,.imap,.pbf,application/octet-stream" hidden></div>
++      <p id="pack-status" class="hint" role="status"></p>
++      <p class="hint">A download that stops carries on from where it stopped; keep the app open while it runs. Each file is checked before it is used. The same files are on the <a href="https://lesothohousehunters.github.io/internot-ai/downloads.html" target="_blank" rel="noopener">downloads page</a>. A file from there, a memory card, a USB stick or another phone goes in with “Import a file”.</p></div>
++
++    <h2>Share with no data</h2>
++    <div class="card"><p class="hint">Send the app, this map or the AI model to a phone nearby. In the list that opens, choose Quick Share (Nearby Share) or Bluetooth. No data or airtime is used.</p>
++      <div class="row wrap"><button id="share-app" type="button">Share the app</button><button id="share-map" type="button">Share this map</button><button id="share-model" type="button">Share the AI model</button></div>
++      <div id="share-nearby-box" hidden><p class="hint">Or send straight to a phone linked in Chat. Both phones: Chat → Find nearby phones.</p>
++        <div class="row wrap"><select id="share-what" aria-label="What to send"><option value="map">This map</option><option value="model">The AI model</option></select><button id="share-peers-btn" type="button">Send to a linked phone</button></div>
++        <ul id="share-peers" class="list"></ul></div>
++      <p id="share-status" class="hint" role="status"></p></div>
+   </section>
+ </main>
+ 
+diff --git a/internot-ai-v0.4/maps.js b/internot-ai-v0.4/maps.js
+index faa5e70..1f08cc3 100644
+--- a/internot-ai-v0.4/maps.js
++++ b/internot-ai-v0.4/maps.js
+@@ -107,10 +107,14 @@ function setProgress(frac, label) {
+ // Ready-made country maps that ship with the app (inside the Android app, or beside the web app).
+ // maps/list.json names them; without it there is only Lesotho.
+ let BUILT_INS = [{ file: 'lesotho.imap', name: 'Lesotho' }];
+-const builtInList = fetch('./maps/list.json').then((r) => (r.ok ? r.json() : null)).then((l) => { if (Array.isArray(l) && l.length) BUILT_INS = l; }, () => {});
+-const chosen = () => { let f = null; try { f = localStorage.getItem('builtInMap'); } catch {} return BUILT_INS.find((b) => b.file === f) || BUILT_INS[0]; };
+-const builtInUrl = (b = chosen()) => './maps/' + b.file;
+ const NATIVE = !!window.Capacitor;
++// Maps downloaded, imported or received later (Android app) are read in place from the app's storage.
++const packMap = (m) => ({ file: m.file, name: m.name, bbox: m.bbox, houses: m.houses || 0, mb: m.mb, url: window.Capacitor.convertFileSrc(m.path) });
++export function addMaps(list) { for (const m of list || []) { const e = packMap(m), i = BUILT_INS.findIndex((b) => b.file === e.file); if (i < 0) BUILT_INS.push(e); else if (BUILT_INS[i].url) BUILT_INS[i] = e; } renderMapInfo(); }
++const builtInList = fetch('./maps/list.json').then((r) => (r.ok ? r.json() : null)).then((l) => { if (Array.isArray(l) && l.length) BUILT_INS = l; }, () => {})
++  .then(async () => { const P = NATIVE ? window.capacitorExports?.registerPlugin?.('Packs') : null; if (P) try { const i = await P.info(); for (const m of i.maps || []) if (!BUILT_INS.some((b) => b.file === m.file)) BUILT_INS.push(packMap(m)); } catch (e) { console.warn('downloaded maps unreadable', e); } });
++const chosen = () => { let f = null; try { f = localStorage.getItem('builtInMap'); } catch {} return BUILT_INS.find((b) => b.file === f) || BUILT_INS[0]; };
++const builtInUrl = (b = chosen()) => b.url || './maps/' + b.file;
+ const TTS = NATIVE ? window.capacitorExports?.registerPlugin?.('TextToSpeech') : null;
+ let builtIn = null;
+ function builtInAvailable() { return builtIn ||= fetch(builtInUrl(BUILT_INS[0]), { method: 'HEAD' }).then((r) => r.ok && !/html/.test(r.headers.get('content-type') || ''), () => false); }
+@@ -144,7 +148,7 @@ async function getBuiltIn() {   // web app: one download, then kept on the devic
+ }
+ const niceName = (file) => { const b = file.replace(/\.(osm\.pbf|pbf|imap)$/i, '').replace(/-latest$|-\d{6}$/, '').replace(/[-_]+/g, ' ').trim(); return b ? b[0].toUpperCase() + b.slice(1) : 'Map'; };
+ 
+-async function importMap(file) {
++export async function importMap(file) {
+   $('map-error').textContent = ''; try { localStorage.removeItem('builtInMap'); } catch {} M.builtIn = null;
+   try {
+     let buf; const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+@@ -777,6 +781,6 @@ export async function initMaps(root) {
+   loadWorld(); satInit(); let sat = false; try { sat = !!localStorage.getItem('mapSat'); } catch {} if (sat) setSat(true);
+   renderMapInfo();
+ }
+-M.api = { parseLocation, setSat, SAT, makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint, switchBuiltIn, builtIns: () => BUILT_INS };
++M.api = { parseLocation, setSat, SAT, makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint, switchBuiltIn, builtIns: () => BUILT_INS, current: () => M.builtIn, addMaps, removeMap: (file) => { BUILT_INS = BUILT_INS.filter((b) => b.file !== file); renderMapInfo(); } };
+ M.api.speakTest = async (text) => { if (!TTS) return { native: false, web: 'speechSynthesis' in window }; const l = await TTS.getSupportedLanguages().catch((e) => ({ error: String(e) })); const said = await Promise.race([TTS.speak({ text, lang: 'en-US' }).then(() => 'spoken', (e) => 'failed: ' + (e?.message || e)), new Promise((r) => setTimeout(() => r('timeout'), 9000))]); return { native: true, languages: l.languages ? l.languages.length : l, said }; };
+ export const mapShown = () => resize();
+diff --git a/internot-ai-v0.4/online.js b/internot-ai-v0.4/online.js
+new file mode 100644
+index 0000000..9bfb027
+--- /dev/null
++++ b/internot-ai-v0.4/online.js
+@@ -0,0 +1,92 @@
++// Internot AI — the only parts that talk to the Internot server, and only when the phone is online.
++//  • Anonymous count: only if the person said Yes. A random id this app makes for itself, the app version,
++//    phone or web, language and region setting, and how often each advert was shown. No name, number or location.
++//  • Adverts and update notices: fetched when online (no id is sent), kept for offline use.
++//  • Unlock codes for paid packs.
++// Everything else in the app works the same with No, or with no internet at all.
++export const SERVER = 'https://internot-server.onrender.com';
++export const APP_VERSION = '0.9.0';
++const $ = (id) => document.getElementById(id);
++const NATIVE = !!window.Capacitor;
++const ls = { get(k, d = null) { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch { return d; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
++const HOUR = 3600e3;
++
++const choice = () => ls.get('countChoice');   // 'yes', 'no' or null (not asked yet)
++function deviceId() {
++  let id = ls.get('deviceId');
++  if (!id) { const b = new Uint8Array(16); crypto.getRandomValues(b); id = [...b].map((x) => x.toString(16).padStart(2, '0')).join(''); ls.set('deviceId', id); }
++  return id;
++}
++const region = () => { try { return (new Intl.Locale(navigator.language).region || '').slice(0, 2) || null; } catch { return null; } };
++const newer = (a, b) => { const p = (v) => String(v || '0').split('.').map((n) => parseInt(n, 10) || 0); const x = p(a), y = p(b); for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); } return false; };
++
++async function call(path, body) {
++  const r = await fetch(SERVER + path, { method: body ? 'POST' : 'GET', headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(15000) });
++  const out = await r.json().catch(() => ({})); if (!r.ok) throw Object.assign(new Error(out.error || 'server error ' + r.status), { status: r.status }); return out;
++}
++
++/* ---------- the question, asked once ---------- */
++function ask() {
++  const box = $('consent'); if (!box || choice()) return;
++  box.hidden = false;
++  $('consent-yes').onclick = () => decide('yes'); $('consent-no').onclick = () => decide('no');
++}
++function decide(v) { ls.set('countChoice', v); $('consent').hidden = true; $('set-count').checked = v === 'yes'; if (v === 'yes') ping(true); else { try { localStorage.removeItem('deviceId'); localStorage.removeItem('adViews'); } catch {} } }
++
++/* ---------- anonymous count, at most once a day ---------- */
++async function ping(force) {
++  if (choice() !== 'yes' || !navigator.onLine) return { skipped: true };
++  if (!force && Date.now() - Number(ls.get('lastPing', 0)) < 20 * HOUR) return { skipped: true };
++  let views = {}; try { views = JSON.parse(ls.get('adViews', '{}')); } catch {}
++  try {
++    await call('/v1/ping', { id: deviceId(), version: APP_VERSION, platform: NATIVE ? 'android' : 'web', country: region(), lang: (navigator.language || '').slice(0, 10), views });
++    ls.set('lastPing', String(Date.now())); ls.set('adViews', '{}'); return { ok: true };
++  } catch (e) { return { error: e.message }; }
++}
++
++/* ---------- adverts and update notices ---------- */
++async function fetchContent(force) {
++  if (!navigator.onLine) return null;
++  if (!force && Date.now() - Number(ls.get('lastContent', 0)) < 6 * HOUR) return null;
++  try { const c = await call('/v1/content'); ls.set('content', JSON.stringify(c)); ls.set('lastContent', String(Date.now())); window.dispatchEvent(new Event('internot-content')); return c; }
++  catch (e) { return { error: e.message }; }
++}
++const cached = () => { try { return JSON.parse(ls.get('content', '{}')); } catch { return {}; } };
++function countView(id) { if (choice() !== 'yes') return; let v = {}; try { v = JSON.parse(ls.get('adViews', '{}')); } catch {} v[id] = (v[id] || 0) + 1; ls.set('adViews', JSON.stringify(v)); }
++
++function showNotice(c = cached()) {
++  const el = $('notice'); if (!el) return; el.textContent = ''; el.hidden = true;
++  const now = Date.now(), closed = (k) => Number(ls.get('closed-' + k, 0)) > now;
++  const add = (kind, key, title, body, link, img) => {
++    el.className = 'notice ' + kind; el.hidden = false;
++    if (img) { const im = document.createElement('img'); im.src = img; im.alt = ''; im.onerror = () => im.remove(); el.append(im); }
++    const t = document.createElement('div'); const b = document.createElement('b'); b.textContent = title; t.append(b);
++    if (kind === 'ad') { const s = document.createElement('small'); s.textContent = 'Sponsored'; t.prepend(s); }
++    if (body) { const p = document.createElement('span'); p.textContent = ' ' + body; t.append(p); }
++    if (link) { const a = document.createElement('a'); a.href = link; a.target = '_blank'; a.rel = 'noopener'; a.textContent = kind === 'update' ? 'Get it' : 'Open'; t.append(' ', a); }
++    const x = document.createElement('button'); x.type = 'button'; x.setAttribute('aria-label', 'Close'); x.textContent = '✕';
++    x.onclick = () => { ls.set('closed-' + key, String(now + (kind === 'update' ? 72 : 24) * HOUR)); showNotice(); };
++    el.append(t, x);
++  };
++  const up = c.update;
++  if (up && newer(up.version, APP_VERSION) && !closed('update-' + up.version)) return add('update', 'update-' + up.version, `Version ${up.version} is available.`, up.notes || '', up.url);
++  const ads = (c.ads || []).filter((a) => !closed('ad-' + a.id) && (!a.ends_at || Date.parse(a.ends_at) > now));
++  if (!ads.length) return;
++  const a = ads[Math.floor(Math.random() * ads.length)];
++  add('ad', 'ad-' + a.id, a.title, a.body, a.link_url, a.image_url); countView(a.id);
++}
++
++/* ---------- paid packs ---------- */
++async function redeem(code, pack) {
++  if (!navigator.onLine) throw new Error('Unlocking needs the internet once. Connect, then try again.');
++  try { return await call('/v1/redeem', { code, pack }); }
++  catch (e) { throw new Error(e.status === 404 || e.status === 400 ? 'That code is not valid for this pack.' : e.status === 409 ? 'That code has already been used.' : 'Could not reach the Internot server. Try again later.'); }
++}
++
++export async function initOnline() {
++  const box = $('set-count'); if (box) { box.checked = choice() === 'yes'; box.onchange = () => decide(box.checked ? 'yes' : 'no'); }
++  showNotice(); ask();
++  const go = async () => { await fetchContent(); showNotice(); await ping(); };
++  window.addEventListener('online', go); setTimeout(go, 4000);
++  window.internotOnline = { ping, fetchContent, showNotice, redeem, decide, choice };
++}
+diff --git a/internot-ai-v0.4/packs.js b/internot-ai-v0.4/packs.js
+new file mode 100644
+index 0000000..a16a299
+--- /dev/null
++++ b/internot-ai-v0.4/packs.js
+@@ -0,0 +1,273 @@
++// Internot AI — maps and AI models after install, and sharing them with no data.
++// Downloads continue where they stopped and are checked (size and SHA-256) before use.
++// Files can also come from a memory card, a USB stick, the downloads page or another phone.
++import { importMap } from './maps.js';
++
++const $ = (id) => document.getElementById(id);
++const NATIVE = !!window.Capacitor;
++const reg = (n) => (NATIVE ? window.capacitorExports?.registerPlugin?.(n) : null);
++const PACKS = reg('Packs'), NEARBY = reg('Nearby');
++const SITE = 'https://lesothohousehunters.github.io/internot-ai/';
++const GB = 1e9;
++const fmt = (b) => (b >= 1073741824 ? (b / 1073741824).toFixed(2) + ' GB' : Math.max(1, Math.round(b / 1048576)) + ' MB');
++let H = null;                       // hooks from app.js
++const P = { catalog: null, device: {}, jobs: new Map(), have: new Map(), partial: new Map(), unlocked: new Map() };
++
++/* ---------- the list of maps and models ---------- */
++async function loadCatalog() {
++  let local = null, online = null;
++  try { local = await (await fetch('./packs.json')).json(); } catch {}
++  try { const r = await fetch(SITE + 'internot-ai-v0.4/packs.json', { cache: 'no-store', signal: AbortSignal.timeout(8000) }); if (r.ok) online = await r.json(); } catch {}
++  const c = online && (!local || (online.updated || '') >= (local.updated || '')) ? online : local;
++  P.catalog = c || { maps: [], models: [] };
++  try { if (online) localStorage.setItem('packsCatalog', JSON.stringify(online)); else if (!local) P.catalog = JSON.parse(localStorage.getItem('packsCatalog')) || P.catalog; } catch {}
++}
++function paidPacks() { try { return (JSON.parse(localStorage.getItem('content') || '{}').packs || []).map((p) => ({ ...p, paid: true })); } catch { return []; } }
++const allPacks = () => [
++  ...(P.catalog.models || []).map((m) => ({ ...m, kind: 'model' })),
++  ...(P.catalog.maps || []).map((m) => ({ ...m, kind: 'map' })),
++  ...paidPacks().filter((p) => !(P.catalog.models || []).concat(P.catalog.maps || []).some((x) => x.id === p.id)),
++].map((p) => ({ ...p, ...(P.unlocked.get(p.id) || {}) }));
++
++/* ---------- this phone ---------- */
++async function readDevice() {
++  const d = {};
++  if (PACKS) { try { const i = await PACKS.info(); d.ram = i.ram; d.free = i.free; } catch {} }
++  if (!d.ram && navigator.deviceMemory) d.ram = navigator.deviceMemory * GB;
++  if (!d.free) { try { const e = await navigator.storage.estimate(); d.free = e.quota - e.usage; } catch {} }
++  P.device = d;
++}
++const fits = (m) => !P.device.ram || P.device.ram >= (m.ram || 0) * GB * 0.9;
++function suggested() {   // the biggest model this phone's memory can hold
++  const ok = (P.catalog.models || []).filter((m) => fits(m) && (NATIVE || !m.nativeOnly)).sort((a, b) => (b.ram || 0) - (a.ram || 0));
++  return ok[0]?.id || (P.catalog.models || [])[0]?.id;
++}
++
++/* ---------- streaming SHA-256 (web app; the Android app checks natively) ---------- */
++const K = new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
++export function sha256() {
++  const h = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
++  const w = new Uint32Array(64), buf = new Uint8Array(64); let fill = 0, len = 0;
++  const block = (b, o) => {
++    for (let i = 0; i < 16; i++) w[i] = (b[o + 4 * i] << 24) | (b[o + 4 * i + 1] << 16) | (b[o + 4 * i + 2] << 8) | b[o + 4 * i + 3];
++    for (let i = 16; i < 64; i++) { const x = w[i - 15], y = w[i - 2]; w[i] = (((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3)) + w[i - 7] + (((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10)) + w[i - 16]; }
++    let [a, bb, c, d, e, f, g, hh] = h;
++    for (let i = 0; i < 64; i++) {
++      const t1 = (hh + (((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7))) + ((e & f) ^ (~e & g)) + K[i] + w[i]) | 0;
++      const t2 = ((((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10))) + ((a & bb) ^ (a & c) ^ (bb & c))) | 0;
++      hh = g; g = f; f = e; e = (d + t1) | 0; d = c; c = bb; bb = a; a = (t1 + t2) | 0;
++    }
++    h[0] += a; h[1] += bb; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
++  };
++  return {
++    update(d) { len += d.length; let i = 0; if (fill) { const n = Math.min(64 - fill, d.length); buf.set(d.subarray(0, n), fill); fill += n; i = n; if (fill === 64) { block(buf, 0); fill = 0; } }
++      for (; i + 64 <= d.length; i += 64) block(d, i); if (i < d.length) { buf.set(d.subarray(i), 0); fill = d.length - i; } },
++    hex() { const bits = len * 8; const pad = new Uint8Array(((fill < 56 ? 56 : 120) - fill) + 8); pad[0] = 0x80; const dv = new DataView(pad.buffer); dv.setUint32(pad.length - 8, Math.floor(bits / 4294967296)); dv.setUint32(pad.length - 4, bits >>> 0); this.update(pad); return [...h].map((x) => x.toString(16).padStart(8, '0')).join(''); },
++  };
++}
++
++/* ---------- downloading ---------- */
++function setJob(id, j) { if (j) P.jobs.set(id, j); else P.jobs.delete(id); render(); }
++const status = (t, err) => { const el = $('pack-status'); el.textContent = t || ''; el.classList.toggle('err', !!err); };
++
++async function webPartial(file) { try { return (await (await H.rootDir.getFileHandle('dl-' + file + '.part')).getFile()).size; } catch { return 0; } }
++
++async function webDownload(p, job) {   // web app: into the browser's private storage, continuing a partial file
++  const root = H.rootDir; if (!root) throw new Error('This browser cannot store files for offline use.');
++  const name = 'dl-' + p.file + '.part', h = await root.getFileHandle(name, { create: true });
++  let have = (await h.getFile()).size; if (p.size && have > p.size) have = 0;
++  if (!p.size || have < p.size) {
++    const res = await fetch(p.url, { headers: have ? { Range: `bytes=${have}-` } : {}, signal: job.abort.signal });
++    if (!res.ok || !res.body) throw new Error('Download failed (' + res.status + ')');
++    if (res.status !== 206) have = 0;
++    const w = await h.createWritable({ keepExistingData: have > 0 }); if (have) await w.seek(have);
++    const rd = res.body.getReader();
++    try { for (;;) { const { value, done } = await rd.read(); if (done) break; await w.write(value); have += value.byteLength; job.done = have; job.total = p.size; job.phase = 'download'; render(); } }
++    finally { await w.close(); }
++  }
++  const f = await h.getFile(); if (p.size && f.size !== p.size) throw new Error('The file is incomplete. Tap Continue.');
++  if (p.sha256) {
++    job.phase = 'checking'; job.done = 0; const s = sha256(), rd = f.stream().getReader();
++    for (;;) { const { value, done } = await rd.read(); if (done) break; s.update(value); job.done += value.byteLength; if (job.done % (64 << 20) < value.byteLength) render(); }
++    if (s.hex() !== p.sha256.toLowerCase()) { await root.removeEntry(name); throw new Error('The file was damaged on the way and was removed. Please download it again.'); }
++  }
++  return h;
++}
++
++async function get(p) {
++  if (P.jobs.has(p.id)) return;
++  if (p.paid && !p.url) {   // paid pack: the code bought from Internot unlocks the download
++    const code = prompt(`${p.name} costs ${p.price || 'a fee'}. Enter the unlock code you received after paying:`); if (!code) return;
++    try { const u = await window.internotOnline.redeem(code.trim(), p.id); P.unlocked.set(p.id, u); Object.assign(p, u); } catch (e) { status(e.message, true); return; }
++  }
++  if (p.kind === 'model' && P.device.ram && !fits(p) && !confirm(`This model needs a phone with about ${p.ram} GB of memory. This phone has ${fmt(P.device.ram)}. It may be very slow or close itself. Download anyway?`)) return;
++  if (P.device.free && p.size && P.device.free < p.size + 100e6 && !confirm(`This needs ${fmt(p.size)} of free space and the phone has ${fmt(P.device.free)}. Try anyway?`)) return;
++  const job = { phase: 'download', done: 0, total: p.size, abort: new AbortController() }; setJob(p.id, job); status('');
++  try {
++    if (PACKS) {
++      const r = await PACKS.download({ id: p.id, url: p.url, file: p.file, size: p.size || -1, sha256: p.sha256 || '' });
++      job.phase = 'installing'; render();
++      await install(p.kind, r.path, p.name);
++    } else if (p.kind === 'model') {
++      if (p.nativeOnly) throw new Error('This model is only for the Android app.');
++      const h = await webDownload(p, job); job.phase = 'installing'; render(); await H.adoptModel(h, p.name, p.size); H.setStatus('Model saved', 'ok');
++    } else {
++      const src = p.site ? new URL('../' + p.site, location.href).href : p.url; let res = null;
++      try { res = await fetch(src, { signal: job.abort.signal }); } catch {}
++      if (!res || !res.ok) { window.open(p.url, '_blank'); throw new Error('Your browser is downloading the file instead. When it finishes, tap “Import a file” and choose it.'); }
++      await importMap(new File([await res.blob()], p.file));
++    }
++    status(`${p.name} is ready.`); P.have.set(p.id, true);
++  } catch (e) {
++    const m = e?.message || String(e);
++    status(m === 'paused' || e?.name === 'AbortError' ? `${p.name} paused. Tap Continue to carry on.` : m, !(m === 'paused' || e?.name === 'AbortError'));
++  }
++  setJob(p.id, null); refreshHave();
++}
++function pause(p) { const j = P.jobs.get(p.id); if (!j) return; j.abort.abort(); PACKS?.cancel({ id: p.id }); }
++
++async function install(kind, path, name) {
++  if (kind === 'model') { await H.unloadModel(); await PACKS.install({ kind, path, name }); await H.refreshModel(); H.setStatus('Model saved', 'ok'); return; }
++  const m = await PACKS.install({ kind: 'map', path, name });
++  const api = window.internotMap.api; api.addMaps([m]); const b = api.builtIns().find((x) => x.file === m.file); if (b) await api.switchBuiltIn(b);
++}
++
++/* ---------- import from a memory card, USB stick, the downloads page or a received file ---------- */
++async function importFile() {
++  if (!PACKS) { $('pack-import-file').click(); return; }
++  status('Choose a map (.imap) or an AI model (.gguf)…');
++  try {
++    await H.unloadModel(); window.internotLoader?.('Copying the file. Large models take a minute or two.');
++    const r = await PACKS.importFile();
++    if (r.kind === 'model') { await H.refreshModel(); status(`AI model “${r.name}” is ready.`); }
++    else { const api = window.internotMap.api; api.addMaps([r]); const b = api.builtIns().find((x) => x.file === r.file); if (b) await api.switchBuiltIn(b); status(`${r.name} map is ready. Pick it under Maps above.`); }
++  } catch (e) { status(e?.message === 'cancelled' ? '' : e?.message || 'Could not use that file.', e?.message !== 'cancelled'); }
++  window.internotLoader?.(null); refreshHave();
++}
++async function webImport(f) {
++  if (/\.gguf$/i.test(f.name)) await H.importModel(f);
++  else if (/\.(imap|pbf)$/i.test(f.name)) await importMap(f);
++  else status('This file is not a map (.imap, .pbf) or an AI model (.gguf).', true);
++}
++
++/* ---------- which packs are already on this phone ---------- */
++async function refreshHave() {
++  P.have.clear(); const api = window.internotMap?.api; const files = new Set((api?.builtIns() || []).map((b) => b.file));
++  const model = (await H.native()) ? (await H.BRAIN.info().catch(() => ({}))).model : window.internot?.modelMeta;
++  for (const p of allPacks()) {
++    if (p.kind === 'map' && files.has(p.file) && NATIVE) P.have.set(p.id, true);
++    if (p.kind === 'map' && !NATIVE && window.internotMap?.map?.name === p.name) P.have.set(p.id, true);
++    if (p.kind === 'model' && model && (model.name === p.name || model.size === p.size)) P.have.set(p.id, true);
++  }
++  for (const p of allPacks()) {
++    if (P.jobs.has(p.id) || !p.file) continue;
++    let n = 0; if (PACKS) { try { n = (await PACKS.partial({ file: p.file })).bytes; } catch {} } else n = await webPartial(p.file);
++    if (n) P.partial.set(p.id, n); else P.partial.delete(p.id);
++  }
++  render();
++}
++
++/* ---------- drawing the list ---------- */
++function render() {
++  const list = $('pack-list'); if (!list || !P.catalog) return; list.textContent = '';
++  const d = P.device, best = suggested();
++  $('pack-device').textContent = `This phone: ${d.ram ? fmt(d.ram) + ' memory' : 'memory not reported'}${d.free ? ' · ' + fmt(d.free) + ' free' : ''}.`;
++  let group = '';
++  for (const p of allPacks()) {
++    const g = p.kind === 'model' ? 'AI models' : 'Country maps'; if (g !== group) { group = g; const h = document.createElement('li'); h.className = 'pack-group'; h.textContent = g; list.append(h); }
++    const li = document.createElement('li'), info = document.createElement('div'); info.className = 'doc-info';
++    const title = document.createElement('b'); title.textContent = (p.tier ? p.tier + ' · ' : '') + p.name; info.append(title);
++    if (p.id === best && p.kind === 'model') { const t = document.createElement('span'); t.className = 'pack-tag'; t.textContent = 'Suggested for this phone'; info.append(t); }
++    const sm = document.createElement('small'); const job = P.jobs.get(p.id);
++    const bits = [p.size ? fmt(p.size) : '', p.kind === 'model' && p.ram ? `phones with ${p.ram} GB+ memory` : '', p.houses ? `${Number(p.houses).toLocaleString()} houses` : '', p.paid ? (p.price || 'paid') : ''].filter(Boolean);
++    if (p.note) bits.push(p.note);
++    if (p.kind === 'model' && p.nativeOnly && !NATIVE) bits.push('Android app only');
++    sm.textContent = bits.join(' · '); info.append(sm);
++    const st = document.createElement('small');
++    if (job) { const f = job.total ? job.done / job.total : 0; st.textContent = job.phase === 'checking' ? `Checking the file… ${Math.round(f * 100)}%` : job.phase === 'installing' ? 'Putting it in place…' : job.phase === 'retry' ? `Connection lost, trying again… ${Math.round(f * 100)}%` : `Downloading… ${fmt(job.done)} of ${p.size ? fmt(p.size) : '?'} (${Math.round(f * 100)}%)`;
++      const bar = document.createElement('div'); bar.className = 'progress'; const fillEl = document.createElement('div'); fillEl.style.width = Math.round(f * 100) + '%'; bar.append(fillEl); info.append(st, bar); }
++    else if (P.have.get(p.id)) { st.textContent = 'On this phone'; info.append(st); }
++    else if (P.partial.get(p.id)) { st.textContent = `${fmt(P.partial.get(p.id))} of ${p.size ? fmt(p.size) : '?'} already downloaded`; info.append(st); }
++    const btns = document.createElement('div'); btns.className = 'row';
++    const b = document.createElement('button'); b.type = 'button';
++    if (job) { b.textContent = 'Pause'; b.onclick = () => pause(p); b.disabled = job.phase !== 'download' && job.phase !== 'retry'; }
++    else if (P.have.get(p.id)) { b.textContent = p.kind === 'map' && NATIVE ? 'Open' : 'Get again'; b.onclick = () => (p.kind === 'map' && NATIVE ? openMap(p) : get(p)); }
++    else { b.textContent = P.partial.get(p.id) ? 'Continue' : p.paid && !p.url ? 'Unlock' : 'Get'; b.className = 'primary'; b.onclick = () => get(p); b.disabled = p.kind === 'model' && p.nativeOnly && !NATIVE; }
++    btns.append(b);
++    if (!job && NATIVE && p.kind === 'map' && P.have.get(p.id) && window.internotMap.api.builtIns().find((x) => x.file === p.file)?.url) {
++      const del = document.createElement('button'); del.type = 'button'; del.className = 'danger'; del.textContent = 'Remove';
++      del.onclick = async () => { if (!confirm(`Remove the ${p.name} map from this phone?`)) return; if (window.internotMap.api.current() === p.file) await window.internotMap.api.switchBuiltIn(window.internotMap.api.builtIns()[0]); await PACKS.remove({ file: p.file }); window.internotMap.api.removeMap(p.file); refreshHave(); };
++      btns.append(del);
++    }
++    li.append(info, btns); list.append(li);
++  }
++}
++async function openMap(p) { const api = window.internotMap.api; const b = api.builtIns().find((x) => x.file === p.file); if (b) { await api.switchBuiltIn(b); document.querySelector('.tabs [data-view=map]')?.click(); } }
++
++/* ---------- sharing with no data ---------- */
++const shareStatus = (t, err) => { const el = $('share-status'); el.textContent = t || ''; el.classList.toggle('err', !!err); };
++async function share(what) {
++  if (!PACKS) {   // web app: share the link to the app
++    const url = SITE; try { if (navigator.share) await navigator.share({ title: 'Internot AI', url }); else { await navigator.clipboard.writeText(url); shareStatus('Link copied.'); } } catch {} return;
++  }
++  const file = what === 'map' ? window.internotMap.api.current() : '';
++  if (what === 'map' && !file) { shareStatus('Open a country map first (Maps, or pick one above).', true); return; }
++  shareStatus(what === 'app' ? 'Preparing the app file…' : 'Opening the share menu…');
++  try { await PACKS.share({ what, file }); shareStatus('Choose Quick Share (Nearby Share) or Bluetooth. The other phone accepts, then opens the file, or uses “Import a file” in Internot AI.'); }
++  catch (e) { shareStatus(e?.message || 'Could not share.', true); }
++}
++async function showPeers() {
++  const ul = $('share-peers'); ul.textContent = '';
++  let r = { peers: [] }; try { r = await NEARBY.peers(); } catch {}
++  if (!r.peers.length) { shareStatus('No linked phone yet. On both phones open Chat and tap “Find nearby phones”, then try again.', true); return; }
++  shareStatus('');
++  for (const peer of r.peers) {
++    const li = document.createElement('li'); const n = document.createElement('div'); n.textContent = peer.name;
++    const b = document.createElement('button'); b.type = 'button'; b.className = 'primary'; b.textContent = 'Send';
++    b.onclick = () => sendTo(peer); li.append(n, b); ul.append(li);
++  }
++}
++async function sendTo(peer) {
++  const what = $('share-what').value, file = what === 'map' ? window.internotMap.api.current() : '';
++  if (what === 'map' && !file) { shareStatus('Open a country map first.', true); return; }
++  try {
++    shareStatus('Getting the file ready…'); const f = await PACKS.pathFor({ what, file });
++    const name = what === 'model' ? (window.internot?.modelMeta?.name || 'AI model') : (window.internotMap.api.builtIns().find((b) => b.file === file)?.name || file);
++    await NEARBY.sendFile({ endpoint: peer.endpoint, path: f.path, kind: what, name, file: what === 'model' ? 'model.gguf' : file });
++    shareStatus(`Waiting for ${peer.name} to accept ${name} (${fmt(f.size)})…`);
++  } catch (e) { shareStatus(e?.message || 'Could not send.', true); }
++}
++function wireNearbyFiles() {
++  NEARBY.addListener('fileOffer', async (o) => {
++    const yes = confirm(`${o.from || 'A linked phone'} wants to send you ${o.kind === 'model' ? 'the AI model' : 'the map'} “${o.name}” (${fmt(o.size)}). It may replace ${o.kind === 'model' ? 'your AI model' : 'nothing; it is added to your maps'}. Accept?`);
++    if (yes && P.device.free && P.device.free < o.size + 100e6) { alert('There is not enough free space on this phone.'); await NEARBY.answerFile({ id: o.id, endpoint: o.endpoint, accept: false }); return; }
++    await NEARBY.answerFile({ id: o.id, endpoint: o.endpoint, accept: yes });
++    if (yes) shareStatus(`Receiving ${o.name}…`);
++  });
++  NEARBY.addListener('fileProgress', async (e) => {
++    if (e.phase === 'moving') shareStatus(`${e.dir === 'in' ? 'Receiving' : 'Sending'}… ${fmt(e.done)} of ${fmt(e.total)}`);
++    else if (e.phase === 'sent') shareStatus('Sent.');
++    else if (e.phase === 'declined') shareStatus('The other phone said no.', true);
++    else if (e.phase === 'failed') shareStatus('The transfer stopped. Keep the phones close together and try again.', true);
++    else if (e.phase === 'received') {
++      try { await install(e.kind, e.path, e.name); shareStatus(`${e.name} received and ready.`); } catch (err) { shareStatus(err?.message || 'The received file could not be used.', true); }
++      refreshHave();
++    }
++  });
++}
++
++export async function initPacks(hooks) {
++  H = hooks;
++  await Promise.all([loadCatalog(), readDevice()]);
++  if (PACKS) PACKS.addListener('progress', (e) => { const j = P.jobs.get(e.id); if (!j) return; j.phase = e.phase; j.done = e.done; if (e.total > 0) j.total = e.total; render(); });
++  $('pack-import').onclick = importFile;
++  $('pack-import-file').onchange = async (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) { await webImport(f); refreshHave(); } };
++  $('share-app').onclick = () => share('app');
++  $('share-map').onclick = () => share('map'); $('share-model').onclick = () => share('model');
++  $('share-map').hidden = !PACKS; $('share-model').hidden = !PACKS;
++  if (NEARBY) { $('share-nearby-box').hidden = false; $('share-peers-btn').onclick = showPeers; wireNearbyFiles(); }
++  window.addEventListener('internot-content', () => refreshHave());
++  document.querySelector('.tabs [data-view=model]')?.addEventListener('click', () => { readDevice().then(refreshHave); });
++  await refreshHave();
++  window.internotPacks = { P, get, pause, install, allPacks, suggested, refreshHave, sha256 };
++}
+diff --git a/internot-ai-v0.4/style.css b/internot-ai-v0.4/style.css
+index 97461bb..9b0e6a9 100644
+--- a/internot-ai-v0.4/style.css
++++ b/internot-ai-v0.4/style.css
+@@ -158,3 +158,13 @@ a { color: var(--accent-deep); }
+ .doc-kind { width: 52px; height: 52px; border-radius: 8px; flex: none; display: grid; place-items: center; background: var(--panel2); color: var(--accent-deep); font: 600 12px system-ui, sans-serif; }
+ .doc-info { flex: 1; min-width: 0; } .doc-info details { margin-top: 4px; } .doc-info summary { font-size: 13px; color: var(--accent-deep); cursor: pointer; }
+ .doc-peek { white-space: pre-wrap; font-size: 13px; color: var(--muted); max-height: 220px; overflow-y: auto; margin: 6px 0 0; }
++/* downloads, adverts and update notices */
++.packs li.pack-group { background: none; border: 0; padding: 10px 2px 2px; font-weight: 600; color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
++.packs li { flex-wrap: wrap; } .packs .doc-info { flex: 1; min-width: 180px; } .packs .progress { margin-top: 6px; }
++.pack-tag { display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 99px; background: var(--accent); color: var(--accent-ink); font-size: 12px; vertical-align: 1px; }
++.notice { display: flex; align-items: center; gap: 10px; background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 10px; padding: 8px 10px; margin-bottom: 10px; font-size: 14px; }
++.notice[hidden] { display: none; } .notice > div { flex: 1; } .notice small { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
++.notice img { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; } .notice a { color: var(--accent-deep); font-weight: 600; }
++.notice button { background: none; border: 0; color: var(--muted); padding: 4px 6px; min-height: 0; }
++#consent { position: fixed; z-index: 30; padding-top: 18vh; }
++#view-chat .notice { margin: 10px 12px 0; }
+diff --git a/internot-ai-v0.4/sw.js b/internot-ai-v0.4/sw.js
+index b954209..627eaf6 100644
+--- a/internot-ai-v0.4/sw.js
++++ b/internot-ai-v0.4/sw.js
+@@ -1,7 +1,7 @@
+ // Internot AI service worker: makes the app open with no internet at all,
+ // and adds the two headers browsers need before they allow multi-threaded (fast) inference.
+-const VERSION = 'internot-v0.8.0';
+-const SHELL = ['./', './index.html', './style.css', './app.js', './maps.js', './mesh.js', './osmpbf.js', './map-worker.js', './lib/qrcode.js', './lib/jsqr.js', './world.json', './icon.svg', './icon-192.png', './icon-512.png', './manifest.webmanifest',
++const VERSION = 'internot-v0.9.0';
++const SHELL = ['./', './index.html', './style.css', './app.js', './maps.js', './mesh.js', './packs.js', './online.js', './osmpbf.js', './map-worker.js', './lib/qrcode.js', './lib/jsqr.js', './world.json', './icon.svg', './icon-192.png', './icon-512.png', './manifest.webmanifest',
+   './lib/wllama/index.js', './lib/wllama/wllama.wasm'];
+ 
+ self.addEventListener('install', (e) => {
+@@ -26,6 +26,10 @@ self.addEventListener('fetch', (e) => {
+   if (new URL(req.url).origin !== self.location.origin) return; // e.g. the one-time model download
+   e.respondWith((async () => {
+     const cache = await caches.open(VERSION);
++    if (/packs\.json$/.test(new URL(req.url).pathname)) {   // the list of maps and models: newest when online
++      try { const res = await fetch(req, { cache: 'no-store' }); if (res.ok) cache.put(req, res.clone()); return isolate(res); }
++      catch { const hit = await cache.match(req, { ignoreSearch: true }); return hit ? isolate(hit) : new Response('{}', { headers: { 'content-type': 'application/json' } }); }
++    }
+     const hit = await cache.match(req, { ignoreSearch: true });
+     if (hit) return isolate(hit);
+     try {
