@@ -1,0 +1,113 @@
+{
+ "updated": "2026-11-18T05:36:17.374Z",
+ "apps": [
+  {
+   "id": "app-lite",
+   "name": "Internot AI for Android (light)",
+   "url": "https://github.com/lesothohousehunters/internot-ai/releases/latest/download/internot-ai.apk",
+   "note": "About 150 MB. Lesotho map inside; get other maps and an AI model in the app."
+  },
+  {
+   "id": "app-full",
+   "name": "Internot AI for Android (full)",
+   "url": "https://github.com/lesothohousehunters/internot-ai/releases/latest/download/internot-ai-full.apk",
+   "note": "About 1.3 GB. AI model and the Lesotho, South Africa and Botswana maps inside."
+  },
+  {
+   "id": "app-web",
+   "name": "Internot AI in the browser (iPhone, computer, any phone)",
+   "url": "https://lesothohousehunters.github.io/internot-ai/internot-ai-v0.4/",
+   "note": "Open once online, then it works offline."
+  }
+ ],
+ "maps": [
+  {
+   "id": "map-lesotho",
+   "name": "Lesotho",
+   "file": "lesotho.imap",
+   "url": "https://github.com/lesothohousehunters/internot-ai/releases/download/packs/lesotho.imap",
+   "size": 48532240,
+   "sha256": "b16bedefcbe1a9049802fb87ce129d029afaa2ee24548685bac6d03217bd303a",
+   "bbox": [
+    2468530272,
+    2503403955,
+    2499482522,
+    2533088769
+   ],
+   "houses": 1029913,
+   "built": "2026-11-17",
+   "site": "internot-ai-v0.4/maps/lesotho.imap"
+  },
+  {
+   "id": "map-south-africa",
+   "name": "South Africa",
+   "file": "south-africa.imap",
+   "url": "https://github.com/lesothohousehunters/internot-ai/releases/download/packs/south-africa.imap",
+   "size": 128150084,
+   "sha256": "9bdd2d07c178535ffe6f624f61cef699b9e55ba3f78e554037c943395b3e518a",
+   "bbox": [
+    2343218886,
+    2416100199,
+    2599536888,
+    2782892755
+   ],
+   "houses": 0,
+   "built": "2026-11-17"
+  },
+  {
+   "id": "map-botswana",
+   "name": "Botswana",
+   "file": "botswana.imap",
+   "url": "https://github.com/lesothohousehunters/internot-ai/releases/download/packs/botswana.imap",
+   "size": 67678160,
+   "sha256": "f3f277c8d63be228e7ba0f724abf46023f96485b761fbba3d72614f4e4a8d2e2",
+   "bbox": [
+    2368090754,
+    2360257372,
+    2498042175,
+    2483242303
+   ],
+   "houses": 1598939,
+   "built": "2026-11-17"
+  }
+ ],
+ "models": [
+  {
+   "id": "model-small",
+   "tier": "Small",
+   "name": "Qwen2.5 0.5B",
+   "file": "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
+   "ram": 2,
+   "licence": "Apache 2.0",
+   "note": "Fastest, but makes the most mistakes",
+   "url": "https://huggingface.co/bartowski/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf",
+   "size": 397808192,
+   "sha256": "6eb923e7d26e9cea28811e1a8e852009b21242fb157b26149d3b188f3a8c8653"
+  },
+  {
+   "id": "model-medium",
+   "tier": "Medium",
+   "name": "Qwen2.5 1.5B",
+   "file": "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf",
+   "ram": 3,
+   "licence": "Apache 2.0",
+   "note": "The one built into the full app",
+   "url": "https://huggingface.co/bartowski/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf",
+   "size": 986048768,
+   "sha256": "1adf0b11065d8ad2e8123ea110d1ec956dab4ab038eab665614adba04b6c3370"
+  },
+  {
+   "id": "model-large",
+   "tier": "Large",
+   "name": "Qwen3 4B",
+   "file": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+   "ram": 6,
+   "licence": "Apache 2.0",
+   "nativeOnly": true,
+   "note": "Most accurate, slowest",
+   "url": "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+   "size": 2497281120,
+   "sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597"
+  }
+ ]
+}
