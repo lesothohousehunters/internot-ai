@@ -1,0 +1,835 @@
+diff --git a/android/MainActivity.java b/android/MainActivity.java
+index 5fe9284..be3597d 100644
+--- a/android/MainActivity.java
++++ b/android/MainActivity.java
+@@ -8,6 +8,7 @@ public class MainActivity extends BridgeActivity {
+     public void onCreate(Bundle savedInstanceState) {
+         registerPlugin(NearbyPlugin.class);
+         registerPlugin(BrainPlugin.class);
++        registerPlugin(PacksPlugin.class);
+         super.onCreate(savedInstanceState);
+     }
+ }
+diff --git a/android/NearbyPlugin.java b/android/NearbyPlugin.java
+index 48138c9..801b539 100644
+--- a/android/NearbyPlugin.java
++++ b/android/NearbyPlugin.java
+@@ -25,7 +25,18 @@ import com.google.android.gms.nearby.connection.Payload;
+ import com.google.android.gms.nearby.connection.PayloadCallback;
+ import com.google.android.gms.nearby.connection.PayloadTransferUpdate;
+ import com.google.android.gms.nearby.connection.Strategy;
++import android.os.ParcelFileDescriptor;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.InputStream;
++import java.io.OutputStream;
+ import java.nio.charset.StandardCharsets;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.Executors;
++import org.json.JSONObject;
++import com.getcapacitor.JSArray;
+ import java.util.HashSet;
+ import java.util.Set;
+ import java.util.UUID;
+@@ -51,6 +62,15 @@ public class NearbyPlugin extends Plugin {
+     private final Handler handler = new Handler(Looper.getMainLooper());
+     private ConnectionsClient client;
+     private boolean running = false;
++    private String myName = "";
++    // Sending maps and models to a linked phone: names of linked phones, offers waiting for a yes, files on the way.
++    private static final String CTRL = "\u0001IF|";
++    private final Map<String, String> names = new ConcurrentHashMap<>();
++    private final Map<String, String> linked = new ConcurrentHashMap<>();
++    private final Map<String, JSONObject> outgoing = new ConcurrentHashMap<>();
++    private final Map<String, JSONObject> incoming = new ConcurrentHashMap<>();
++    private final Map<Long, String> payloadOffer = new ConcurrentHashMap<>();
++    private final Map<Long, Payload> filePayloads = new ConcurrentHashMap<>();
+ 
+     private String[] needed() {
+         if (Build.VERSION.SDK_INT >= 33) return new String[] { "location", "bluetooth", "wifi" };
+@@ -86,6 +106,7 @@ public class NearbyPlugin extends Plugin {
+         try {
+             if (client == null) client = Nearby.getConnectionsClient(getContext());
+             final String name = token + "|" + call.getString("name", "Internot");
++            myName = name;
+             final Strategy strategy = Strategy.P2P_CLUSTER;
+             client
+                 .startAdvertising(name, SERVICE, lifecycle, new AdvertisingOptions.Builder().setStrategy(strategy).build())
+@@ -150,7 +171,7 @@ public class NearbyPlugin extends Plugin {
+     private void connect(final String endpointId, final int triesLeft) {
+         if (!running || client == null) return;
+         client
+-            .requestConnection(token, endpointId, lifecycle)
++            .requestConnection(myName.isEmpty() ? token : myName, endpointId, lifecycle)
+             .addOnFailureListener(e -> {
+                 if (triesLeft > 0 && asked.contains(endpointId)) handler.postDelayed(() -> connect(endpointId, triesLeft - 1), 3000);
+                 else asked.remove(endpointId);
+@@ -160,29 +181,37 @@ public class NearbyPlugin extends Plugin {
+     private final PayloadCallback payloads = new PayloadCallback() {
+         @Override
+         public void onPayloadReceived(String endpointId, Payload payload) {
++            if (payload.getType() == Payload.Type.FILE) { filePayloads.put(payload.getId(), payload); return; }
+             byte[] bytes = payload.getType() == Payload.Type.BYTES ? payload.asBytes() : null;
+-            if (bytes != null) emit("data", endpointId, new String(bytes, StandardCharsets.UTF_8));
++            if (bytes == null) return;
++            String s = new String(bytes, StandardCharsets.UTF_8);
++            if (s.startsWith(CTRL)) { control(endpointId, s.substring(CTRL.length())); return; }
++            emit("data", endpointId, s);
+         }
+ 
+         @Override
+-        public void onPayloadTransferUpdate(String endpointId, PayloadTransferUpdate update) {}
++        public void onPayloadTransferUpdate(String endpointId, PayloadTransferUpdate update) { fileUpdate(endpointId, update); }
+     };
+ 
+     private final ConnectionLifecycleCallback lifecycle = new ConnectionLifecycleCallback() {
+         @Override
+         public void onConnectionInitiated(String endpointId, ConnectionInfo info) {
++            String n = info.getEndpointName();
++            int bar = n.indexOf('|');
++            if (bar > 0) names.put(endpointId, n.substring(bar + 1));
+             client.acceptConnection(endpointId, payloads);
+         }
+ 
+         @Override
+         public void onConnectionResult(String endpointId, ConnectionResolution result) {
+-            if (result.getStatus().isSuccess()) emit("connected", endpointId, null);
++            if (result.getStatus().isSuccess()) { linked.put(endpointId, "1"); emit("connected", endpointId, null); }
+             else asked.remove(endpointId);
+         }
+ 
+         @Override
+         public void onDisconnected(String endpointId) {
+             asked.remove(endpointId);
++            linked.remove(endpointId);
+             emit("disconnected", endpointId, null);
+         }
+     };
+@@ -193,6 +222,7 @@ public class NearbyPlugin extends Plugin {
+             String other = info.getEndpointName();
+             int bar = other.indexOf('|');
+             String theirs = bar > 0 ? other.substring(0, bar) : other;
++            if (bar > 0) names.put(endpointId, other.substring(bar + 1));
+             // Only the phone with the smaller token asks, so two requests never cross.
+             if (token.compareTo(theirs) >= 0 || !asked.add(endpointId)) return;
+             connect(endpointId, 3);
+@@ -203,4 +233,137 @@ public class NearbyPlugin extends Plugin {
+             asked.remove(endpointId);
+         }
+     };
++
++    /* ---------- maps and models to a linked phone ---------- */
++
++    @PluginMethod
++    public void peers(PluginCall call) {
++        JSArray a = new JSArray();
++        for (String ep : linked.keySet()) {
++            JSObject o = new JSObject();
++            o.put("endpoint", ep);
++            o.put("name", names.containsKey(ep) ? names.get(ep) : "Nearby phone");
++            a.put(o);
++        }
++        JSObject r = new JSObject();
++        r.put("peers", a);
++        r.put("on", running);
++        call.resolve(r);
++    }
++
++    private void ctrl(String endpoint, String s) {
++        client.sendPayload(endpoint, Payload.fromBytes((CTRL + s).getBytes(StandardCharsets.UTF_8)));
++    }
++
++    /** Offers a file to a linked phone. It is sent once the other person says yes. */
++    @PluginMethod
++    public void sendFile(PluginCall call) {
++        String endpoint = call.getString("endpoint"), path = call.getString("path");
++        if (client == null || endpoint == null || path == null || !new File(path).exists()) { call.reject("Not linked, or the file is missing"); return; }
++        try {
++            JSONObject o = new JSONObject();
++            String id = UUID.randomUUID().toString().substring(0, 12);
++            o.put("id", id);
++            o.put("kind", call.getString("kind", ""));
++            o.put("name", call.getString("name", ""));
++            o.put("file", call.getString("file", new File(path).getName()));
++            o.put("size", new File(path).length());
++            o.put("from", myName.contains("|") ? myName.substring(myName.indexOf('|') + 1) : "");
++            outgoing.put(id, new JSONObject(o.toString()).put("path", path).put("endpoint", endpoint));
++            ctrl(endpoint, "offer|" + o.toString());
++            JSObject r = new JSObject();
++            r.put("id", id);
++            call.resolve(r);
++        } catch (Exception e) {
++            call.reject(String.valueOf(e.getMessage()));
++        }
++    }
++
++    @PluginMethod
++    public void answerFile(PluginCall call) {
++        String id = call.getString("id", ""), endpoint = call.getString("endpoint", "");
++        boolean yes = Boolean.TRUE.equals(call.getBoolean("accept", false));
++        if (client == null) { call.reject("Not linked"); return; }
++        if (!yes) incoming.remove(id);
++        ctrl(endpoint, (yes ? "accept|" : "decline|") + id);
++        call.resolve();
++    }
++
++    private void control(String endpoint, String s) {
++        try {
++            int bar = s.indexOf('|');
++            String verb = bar > 0 ? s.substring(0, bar) : s, rest = bar > 0 ? s.substring(bar + 1) : "";
++            if ("offer".equals(verb)) {
++                JSONObject o = new JSONObject(rest);
++                incoming.put(o.getString("id"), o);
++                JSObject e = new JSObject(o.toString());
++                e.put("endpoint", endpoint);
++                notifyListeners("fileOffer", e);
++            } else if ("accept".equals(verb) || "decline".equals(verb)) {
++                JSONObject o = outgoing.get(rest);
++                if (o == null) return;
++                JSObject e = new JSObject();
++                e.put("id", rest);
++                if ("decline".equals(verb)) { outgoing.remove(rest); e.put("phase", "declined"); notifyListeners("fileProgress", e); return; }
++                Payload p = Payload.fromFile(new File(o.getString("path")));
++                payloadOffer.put(p.getId(), rest);
++                ctrl(endpoint, "payload|" + rest + "|" + p.getId());
++                client.sendPayload(endpoint, p);
++                e.put("phase", "sending");
++                notifyListeners("fileProgress", e);
++            } else if ("payload".equals(verb)) {
++                String[] a = rest.split("\\|");
++                if (a.length == 2 && incoming.containsKey(a[0])) payloadOffer.put(Long.parseLong(a[1]), a[0]);
++            }
++        } catch (Exception ignored) {}
++    }
++
++    private void fileUpdate(String endpoint, PayloadTransferUpdate u) {
++        String id = payloadOffer.get(u.getPayloadId());
++        if (id == null) return;
++        boolean receiving = incoming.containsKey(id);
++        JSObject e = new JSObject();
++        e.put("id", id);
++        e.put("done", u.getBytesTransferred());
++        e.put("total", u.getTotalBytes());
++        e.put("dir", receiving ? "in" : "out");
++        int st = u.getStatus();
++        if (st == PayloadTransferUpdate.Status.IN_PROGRESS) { e.put("phase", "moving"); notifyListeners("fileProgress", e); return; }
++        payloadOffer.remove(u.getPayloadId());
++        if (st != PayloadTransferUpdate.Status.SUCCESS) {
++            incoming.remove(id); outgoing.remove(id); filePayloads.remove(u.getPayloadId());
++            e.put("phase", "failed");
++            notifyListeners("fileProgress", e);
++            return;
++        }
++        if (!receiving) { outgoing.remove(id); e.put("phase", "sent"); notifyListeners("fileProgress", e); return; }
++        final JSONObject o = incoming.remove(id);
++        final Payload p = filePayloads.remove(u.getPayloadId());
++        Executors.newSingleThreadExecutor().execute(() -> {
++            try {
++                File dir = new File(getContext().getFilesDir(), "packs/dl");
++                dir.mkdirs();
++                File out = new File(dir, o.optString("file", "received").replaceAll("[^A-Za-z0-9._-]", "_"));
++                ParcelFileDescriptor pfd = p.asFile().asParcelFileDescriptor();
++                try (InputStream in = new FileInputStream(pfd.getFileDescriptor()); OutputStream w = new FileOutputStream(out)) {
++                    byte[] buf = new byte[1 << 20];
++                    int n;
++                    while ((n = in.read(buf)) > 0) w.write(buf, 0, n);
++                } finally {
++                    try { pfd.close(); } catch (Exception ignored) {}
++                    try { if (p.asFile().asUri() != null) getContext().getContentResolver().delete(p.asFile().asUri(), null, null); } catch (Exception ignored) {}
++                }
++                if (out.length() != o.optLong("size", -1)) { out.delete(); throw new Exception("incomplete"); }
++                JSObject r = new JSObject(o.toString());
++                r.put("phase", "received");
++                r.put("path", out.getAbsolutePath());
++                notifyListeners("fileProgress", r);
++            } catch (Exception ex) {
++                JSObject r = new JSObject();
++                r.put("id", id);
++                r.put("phase", "failed");
++                notifyListeners("fileProgress", r);
++            }
++        });
++    }
+ }
+diff --git a/android/PacksPlugin.java b/android/PacksPlugin.java
+new file mode 100644
+index 0000000..c368238
+--- /dev/null
++++ b/android/PacksPlugin.java
+@@ -0,0 +1,424 @@
++package org.internot.app;
++
++import android.app.Activity;
++import android.app.ActivityManager;
++import android.content.Context;
++import android.content.Intent;
++import android.database.Cursor;
++import android.net.Uri;
++import android.os.PowerManager;
++import android.os.StatFs;
++import android.provider.OpenableColumns;
++import androidx.activity.result.ActivityResult;
++import androidx.core.content.FileProvider;
++import com.getcapacitor.JSArray;
++import com.getcapacitor.JSObject;
++import com.getcapacitor.Plugin;
++import com.getcapacitor.PluginCall;
++import com.getcapacitor.PluginMethod;
++import com.getcapacitor.annotation.ActivityCallback;
++import com.getcapacitor.annotation.CapacitorPlugin;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.io.RandomAccessFile;
++import java.net.HttpURLConnection;
++import java.net.URL;
++import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++import org.json.JSONObject;
++
++/**
++ * Maps and AI models after install: downloads that continue where they stopped, checked against their
++ * SHA-256; files imported from a memory card, USB stick or a received file; and sharing the app, a map
++ * or the model through the phone's share menu (Quick Share, Bluetooth, WhatsApp and similar).
++ */
++@CapacitorPlugin(name = "Packs")
++public class PacksPlugin extends Plugin {
++
++    private final ExecutorService net = Executors.newSingleThreadExecutor();
++    private final ExecutorService io = Executors.newSingleThreadExecutor();
++    private final Map<String, Boolean> cancelled = new ConcurrentHashMap<>();
++
++    private File dir(String name) { File d = new File(getContext().getFilesDir(), name); d.mkdirs(); return d; }
++    private File dlDir() { return dir("packs/dl"); }
++    private File mapsDir() { return dir("packs/maps"); }
++    private File modelFile() { return new File(getContext().getFilesDir(), "model.gguf"); }
++    private File modelMeta() { return new File(getContext().getFilesDir(), "model.json"); }
++    private static String safe(String f) { return f == null ? "" : f.replaceAll("[^A-Za-z0-9._-]", "_"); }
++
++    @PluginMethod
++    public void info(PluginCall call) {
++        ActivityManager am = (ActivityManager) getContext().getSystemService(Context.ACTIVITY_SERVICE);
++        ActivityManager.MemoryInfo mi = new ActivityManager.MemoryInfo();
++        am.getMemoryInfo(mi);
++        StatFs fs = new StatFs(getContext().getFilesDir().getAbsolutePath());
++        JSObject r = new JSObject();
++        r.put("ram", mi.totalMem);
++        r.put("free", fs.getAvailableBytes());
++        r.put("maps", listMaps());
++        call.resolve(r);
++    }
++
++    private JSArray listMaps() {
++        JSArray a = new JSArray();
++        File[] fs = mapsDir().listFiles();
++        if (fs != null) for (File f : fs) {
++            if (!f.getName().endsWith(".imap")) continue;
++            JSObject h = header(f);
++            if (h == null) continue;
++            h.put("file", f.getName());
++            h.put("path", f.getAbsolutePath());
++            h.put("mb", Math.round(f.length() / 1048576.0));
++            a.put(h);
++        }
++        return a;
++    }
++
++    /** The name, area and house count from the start of an Internot map file, or null if it is not one. */
++    static JSObject header(File f) {
++        try (RandomAccessFile r = new RandomAccessFile(f, "r")) {
++            byte[] b = new byte[(int) Math.min(800, f.length())];
++            r.readFully(b);
++            if (b.length < 16 || b[0] != 'I' || b[1] != 'M' || b[2] != 'A' || b[3] != 'P') return null;
++            String s = new String(b, 12, b.length - 12, StandardCharsets.UTF_8);
++            JSObject o = new JSObject();
++            Matcher m = Pattern.compile("\"name\":\"((?:[^\"\\\\]|\\\\.)*)\"").matcher(s);
++            o.put("name", m.find() ? m.group(1) : f.getName().replace(".imap", ""));
++            m = Pattern.compile("\"bbox\":\\[([-0-9.,e]+)\\]").matcher(s);
++            if (m.find()) { JSArray bb = new JSArray(); for (String v : m.group(1).split(",")) bb.put(Double.parseDouble(v)); o.put("bbox", bb); }
++            m = Pattern.compile("\"B\":(\\d+)").matcher(s);
++            o.put("houses", m.find() ? Long.parseLong(m.group(1)) : 0);
++            return o;
++        } catch (Exception e) {
++            return null;
++        }
++    }
++
++    private void progress(String id, String phase, long done, long total) {
++        JSObject p = new JSObject();
++        p.put("id", id);
++        p.put("phase", phase);
++        p.put("done", done);
++        p.put("total", total);
++        notifyListeners("progress", p);
++    }
++
++    /** Bytes already downloaded for a file, so the screen can say "continue". */
++    @PluginMethod
++    public void partial(PluginCall call) {
++        File part = new File(dlDir(), safe(call.getString("file")) + ".part");
++        JSObject r = new JSObject();
++        r.put("bytes", part.exists() ? part.length() : 0);
++        call.resolve(r);
++    }
++
++    @PluginMethod
++    public void cancel(PluginCall call) {
++        String id = call.getString("id", "");
++        cancelled.put(id, true);
++        call.resolve();
++    }
++
++    /** Downloads url to packs/dl/<file>, continuing a partial file. Resolves once the size and SHA-256 match. */
++    @PluginMethod
++    public void download(PluginCall call) {
++        final String id = call.getString("id", "");
++        final String url = call.getString("url");
++        final String file = safe(call.getString("file"));
++        final long size = (long) (double) call.getDouble("size", -1.0);
++        final String sha = call.getString("sha256", "");
++        if (url == null || file.isEmpty()) { call.reject("url and file are needed"); return; }
++        if (size > 0) {
++            long free = new StatFs(getContext().getFilesDir().getAbsolutePath()).getAvailableBytes();
++            File part = new File(dlDir(), file + ".part");
++            long need = size - (part.exists() ? part.length() : 0) + (64L << 20);
++            if (free < need) { call.reject("Not enough free space: " + (need >> 20) + " MB needed, " + (free >> 20) + " MB free."); return; }
++        }
++        cancelled.remove(id);
++        net.execute(() -> {
++            PowerManager pm = (PowerManager) getContext().getSystemService(Context.POWER_SERVICE);
++            PowerManager.WakeLock lock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "internot:download");
++            lock.acquire(6 * 60 * 60 * 1000L);
++            try {
++                File part = new File(dlDir(), file + ".part"), done = new File(dlDir(), file);
++                done.delete();
++                String err = null;
++                for (int attempt = 0; attempt < 6; attempt++) {
++                    if (Boolean.TRUE.equals(cancelled.get(id))) { call.reject("paused"); return; }
++                    try { err = null; fetch(id, url, part, size); break; }
++                    catch (Exception e) {
++                        err = e.getMessage();
++                        if ("paused".equals(err) || (err != null && err.startsWith("The server"))) break;
++                        progress(id, "retry", part.length(), size);
++                        Thread.sleep(Math.min(30000, 2000L << attempt));
++                    }
++                }
++                if (err != null) { call.reject(err); return; }
++                if (size > 0 && part.length() != size) { call.reject("The file is incomplete. Tap to continue."); return; }
++                if (!sha.isEmpty()) {
++                    progress(id, "checking", 0, part.length());
++                    String got = sha256(part, id);
++                    if (!sha.equalsIgnoreCase(got)) { part.delete(); call.reject("The file was damaged on the way and was removed. Please download it again."); return; }
++                }
++                if (!part.renameTo(done)) { call.reject("Could not save the file."); return; }
++                JSObject r = new JSObject();
++                r.put("path", done.getAbsolutePath());
++                r.put("size", done.length());
++                call.resolve(r);
++            } catch (Exception e) {
++                call.reject(String.valueOf(e.getMessage()));
++            } finally {
++                if (lock.isHeld()) lock.release();
++            }
++        });
++    }
++
++    private void fetch(String id, String url, File part, long size) throws Exception {
++        long have = part.exists() ? part.length() : 0;
++        if (size > 0 && have == size) return;
++        if (size > 0 && have > size) { part.delete(); have = 0; }
++        HttpURLConnection c = null;
++        String at = url;
++        for (int hop = 0; hop < 6; hop++) {   // follow redirects by hand so the Range header is kept on every hop
++            c = (HttpURLConnection) new URL(at).openConnection();
++            c.setInstanceFollowRedirects(false);
++            c.setConnectTimeout(20000);
++            c.setReadTimeout(30000);
++            c.setRequestProperty("User-Agent", "InternotAI");
++            if (have > 0) c.setRequestProperty("Range", "bytes=" + have + "-");
++            int code = c.getResponseCode();
++            if (code >= 300 && code < 400 && c.getHeaderField("Location") != null) { at = new URL(new URL(at), c.getHeaderField("Location")).toString(); c.disconnect(); continue; }
++            break;
++        }
++        int code = c.getResponseCode();
++        if (code == 416 && size > 0 && have == size) return;
++        if (code == 404 || code == 403 || code == 401) throw new Exception("The server does not have this file (" + code + ").");
++        boolean append = code == 206;
++        if (code != 200 && code != 206) throw new Exception("Download failed (" + code + ")");
++        if (!append) have = 0;
++        byte[] buf = new byte[1 << 16];
++        long last = 0;
++        try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(part, append)) {
++            int n;
++            while ((n = in.read(buf)) > 0) {
++                if (Boolean.TRUE.equals(cancelled.get(id))) throw new Exception("paused");
++                out.write(buf, 0, n);
++                have += n;
++                if (have - last > (2 << 20)) { last = have; progress(id, "download", have, size); }
++            }
++        } finally {
++            c.disconnect();
++        }
++        progress(id, "download", have, size);
++        if (size > 0 && have < size) throw new Exception("connection dropped");
++    }
++
++    private String sha256(File f, String id) throws Exception {
++        MessageDigest md = MessageDigest.getInstance("SHA-256");
++        byte[] buf = new byte[1 << 20];
++        long done = 0, last = 0, total = f.length();
++        try (InputStream in = new FileInputStream(f)) {
++            int n;
++            while ((n = in.read(buf)) > 0) {
++                md.update(buf, 0, n);
++                done += n;
++                if (done - last > (32 << 20)) { last = done; progress(id, "checking", done, total); }
++            }
++        }
++        StringBuilder s = new StringBuilder();
++        for (byte b : md.digest()) s.append(String.format("%02x", b));
++        return s.toString();
++    }
++
++    /** Puts a downloaded or received file in place: a model becomes The Brain's model, a map joins the maps. */
++    @PluginMethod
++    public void install(PluginCall call) {
++        final String kind = call.getString("kind", "");
++        final String from = call.getString("path");
++        final String name = call.getString("name", "");
++        io.execute(() -> {
++            try {
++                File src = new File(from == null ? "" : from);
++                if (!src.exists()) { call.reject("The file is missing."); return; }
++                call.resolve(place(kind, src, name, true));
++            } catch (Exception e) {
++                call.reject(String.valueOf(e.getMessage()));
++            }
++        });
++    }
++
++    private JSObject place(String kind, File src, String name, boolean move) throws Exception {
++        byte[] magic = new byte[4];
++        try (RandomAccessFile r = new RandomAccessFile(src, "r")) { r.readFully(magic); }
++        String m = new String(magic, StandardCharsets.US_ASCII);
++        if (kind.isEmpty()) kind = "GGUF".equals(m) ? "model" : "IMAP".equals(m) ? "map" : "";
++        JSObject out = new JSObject();
++        out.put("kind", kind);
++        if ("model".equals(kind)) {
++            if (!"GGUF".equals(m)) throw new Exception("That is not a GGUF model file.");
++            File dst = modelFile();
++            File tmp = new File(getContext().getFilesDir(), "model.gguf.new");
++            if (move) { tmp.delete(); if (!src.renameTo(tmp)) throw new Exception("Could not save the model."); } else copy(src, tmp, "import");
++            dst.delete();
++            if (!tmp.renameTo(dst)) throw new Exception("Could not save the model.");
++            JSONObject o = new JSONObject();
++            o.put("name", name.isEmpty() ? "AI model" : name);
++            try (FileOutputStream w = new FileOutputStream(modelMeta())) { w.write(o.toString().getBytes(StandardCharsets.UTF_8)); }
++            out.put("name", o.getString("name"));
++            out.put("size", dst.length());
++            return out;
++        }
++        if ("map".equals(kind)) {
++            if (!"IMAP".equals(m)) throw new Exception("That is not an Internot map file (.imap).");
++            String fn = safe(src.getName().endsWith(".imap") ? src.getName() : (name.isEmpty() ? "map" : name) + ".imap");
++            File dst = new File(mapsDir(), fn);
++            if (move) { dst.delete(); if (!src.renameTo(dst)) throw new Exception("Could not save the map."); } else copy(src, dst, "import");
++            JSObject h = header(dst);
++            if (h == null) { dst.delete(); throw new Exception("That map file is damaged."); }
++            h.put("file", dst.getName());
++            h.put("path", dst.getAbsolutePath());
++            h.put("mb", Math.round(dst.length() / 1048576.0));
++            h.put("kind", "map");
++            return h;
++        }
++        throw new Exception("This file is not a map (.imap) or an AI model (.gguf).");
++    }
++
++    private void copy(File src, File dst, String id) throws Exception {
++        try (InputStream in = new FileInputStream(src)) { copy(in, src.length(), dst, id); }
++    }
++
++    private void copy(InputStream in, long total, File dst, String id) throws Exception {
++        File tmp = new File(dst.getParentFile(), dst.getName() + ".copy");
++        byte[] buf = new byte[1 << 20];
++        long done = 0, last = 0;
++        try (OutputStream out = new FileOutputStream(tmp)) {
++            int n;
++            while ((n = in.read(buf)) > 0) {
++                out.write(buf, 0, n);
++                done += n;
++                if (done - last > (8 << 20)) { last = done; progress(id, "copy", done, total); }
++            }
++        }
++        dst.delete();
++        if (!tmp.renameTo(dst)) throw new Exception("Could not save the file.");
++    }
++
++    @PluginMethod
++    public void remove(PluginCall call) {
++        File f = new File(mapsDir(), safe(call.getString("file")));
++        f.delete();
++        call.resolve();
++    }
++
++    /** The phone's own file picker: a map or a model from a memory card, USB stick, Downloads or a received file. */
++    @PluginMethod
++    public void importFile(PluginCall call) {
++        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
++        i.addCategory(Intent.CATEGORY_OPENABLE);
++        i.setType("*/*");
++        startActivityForResult(call, i, "picked");
++    }
++
++    @ActivityCallback
++    private void picked(PluginCall call, ActivityResult result) {
++        if (call == null) return;
++        if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null || result.getData().getData() == null) { call.reject("cancelled"); return; }
++        final Uri uri = result.getData().getData();
++        io.execute(() -> {
++            try {
++                String name = "file";
++                long size = -1;
++                try (Cursor c = getContext().getContentResolver().query(uri, null, null, null, null)) {
++                    if (c != null && c.moveToFirst()) {
++                        int ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME), si = c.getColumnIndex(OpenableColumns.SIZE);
++                        if (ni >= 0) name = c.getString(ni);
++                        if (si >= 0) size = c.getLong(si);
++                    }
++                }
++                File tmp = new File(dlDir(), safe(name));
++                try (InputStream in = getContext().getContentResolver().openInputStream(uri)) { copy(in, size, tmp, "import"); }
++                String base = name.replaceAll("(?i)\\.(gguf|imap)$", "");
++                try { call.resolve(place("", tmp, base, true)); } finally { tmp.delete(); }
++            } catch (Exception e) {
++                call.reject(String.valueOf(e.getMessage()));
++            }
++        });
++    }
++
++    /** A file on the phone for sharing: the app itself, a map (copied out of the app if it is built in) or the model. */
++    private File fileFor(String what, String file) throws Exception {
++        File share = dir("share");
++        if ("app".equals(what)) {
++            File apk = new File(getContext().getApplicationInfo().sourceDir);
++            File named = new File(share, "Internot-AI.apk");
++            if (named.exists() && named.length() == apk.length() && named.lastModified() >= apk.lastModified()) return named;
++            long free = new StatFs(share.getAbsolutePath()).getAvailableBytes();
++            if (free < apk.length() + (64L << 20)) return apk;   // no room for a copy with a friendly name: share it as it is
++            copy(apk, named, "share");
++            return named;
++        }
++        if ("model".equals(what)) {
++            if (!modelFile().exists()) throw new Exception("There is no AI model on this phone yet.");
++            return modelFile();
++        }
++        if ("map".equals(what)) {
++            String f = safe(file);
++            File own = new File(mapsDir(), f);
++            if (own.exists()) return own;
++            File out = new File(share, f);
++            if (out.exists() && out.length() > 0) return out;
++            try (InputStream in = getContext().getAssets().open("public/maps/" + f)) { copy(in, -1, out, "share"); }
++            return out;
++        }
++        throw new Exception("Nothing to share");
++    }
++
++    @PluginMethod
++    public void pathFor(PluginCall call) {
++        final String what = call.getString("what", ""), file = call.getString("file", "");
++        io.execute(() -> {
++            try {
++                File f = fileFor(what, file);
++                JSObject r = new JSObject();
++                r.put("path", f.getAbsolutePath());
++                r.put("size", f.length());
++                call.resolve(r);
++            } catch (Exception e) {
++                call.reject(String.valueOf(e.getMessage()));
++            }
++        });
++    }
++
++    @PluginMethod
++    public void share(PluginCall call) {
++        final String what = call.getString("what", ""), file = call.getString("file", "");
++        io.execute(() -> {
++            try {
++                File f = fileFor(what, file);
++                Uri uri = FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".fileprovider", f);
++                Intent send = new Intent(Intent.ACTION_SEND);
++                send.setType("app".equals(what) ? "application/vnd.android.package-archive" : "application/octet-stream");
++                send.putExtra(Intent.EXTRA_STREAM, uri);
++                send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
++                Intent chooser = Intent.createChooser(send, "Share with no data");
++                chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
++                getActivity().runOnUiThread(() -> {
++                    try { getActivity().startActivity(chooser); call.resolve(); }
++                    catch (Exception e) { call.reject(String.valueOf(e.getMessage())); }
++                });
++            } catch (Exception e) {
++                call.reject(String.valueOf(e.getMessage()));
++            }
++        });
++    }
++}
+diff --git a/android/emulator-test.sh b/android/emulator-test.sh
+index 2562b22..a1602f7 100644
+--- a/android/emulator-test.sh
++++ b/android/emulator-test.sh
+@@ -8,7 +8,7 @@ adb logcat -c
+ adb shell am start -n org.internot.app/.MainActivity
+ adb shell dumpsys package com.google.android.webview | grep -m1 versionName > test-out/webview.txt 2>&1 || true
+ seen=0
+-for i in $(seq 1 1000); do
++for i in $(seq 1 2600); do
+   sleep 2
+   adb logcat -d -v time 2>/dev/null | grep -E "INTERNOT-TEST|Capacitor.*(E/|rror)|AndroidRuntime|chromium.*(Uncaught|rror)" | cut -c1-1500 > test-out/report.txt
+   n=$(grep -c "INTERNOT-TEST shot" test-out/report.txt)
+diff --git a/android/make-packs.mjs b/android/make-packs.mjs
+new file mode 100644
+index 0000000..bb0fb85
+--- /dev/null
++++ b/android/make-packs.mjs
+@@ -0,0 +1,56 @@
++// Build step: writes internot-ai-v0.4/packs.json, the list of maps and AI models the app and the downloads
++// page offer, with each file's exact size and SHA-256. Prints the map files that must be (re)uploaded.
++//   node android/make-packs.mjs <out packs.json> <release download url> <map.imap>...
++import fs from 'node:fs';
++import crypto from 'node:crypto';
++import path from 'node:path';
++
++const [out, release, ...mapFiles] = process.argv.slice(2);
++const old = (() => { try { return JSON.parse(fs.readFileSync(out, 'utf8')); } catch { return {}; } })();
++const REPO = 'https://github.com/lesothohousehunters/internot-ai/releases/latest/download/';
++
++const MODELS = [
++  { id: 'model-small', tier: 'Small', name: 'Qwen2.5 0.5B', repo: 'bartowski/Qwen2.5-0.5B-Instruct-GGUF', file: 'Qwen2.5-0.5B-Instruct-Q4_K_M.gguf', ram: 2, licence: 'Apache 2.0', note: 'Fastest, but makes the most mistakes' },
++  { id: 'model-medium', tier: 'Medium', name: 'Qwen2.5 1.5B', repo: 'bartowski/Qwen2.5-1.5B-Instruct-GGUF', file: 'Qwen2.5-1.5B-Instruct-Q4_K_M.gguf', ram: 3, licence: 'Apache 2.0', note: 'The one built into the full app' },
++  { id: 'model-large', tier: 'Large', name: 'Qwen3 4B', repo: 'unsloth/Qwen3-4B-Instruct-2507-GGUF', file: 'Qwen3-4B-Instruct-2507-Q4_K_M.gguf', ram: 6, licence: 'Apache 2.0', nativeOnly: true, note: 'Most accurate, slowest' },
++];
++
++async function hfInfo(m) {   // exact size and SHA-256 from Hugging Face
++  const url = `https://huggingface.co/${m.repo}/resolve/main/${m.file}`;
++  try {
++    const r = await fetch(`https://huggingface.co/api/models/${m.repo}/paths-info/main`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paths: [m.file], expand: true }) });
++    const j = await r.json(); const e = Array.isArray(j) && j[0];
++    if (e && e.lfs && e.lfs.oid) return { url, size: e.lfs.size || e.size, sha256: e.lfs.oid };
++  } catch (e) { console.error('paths-info failed for', m.file, e.message); }
++  const r = await fetch(url, { method: 'HEAD', redirect: 'manual' });
++  const size = Number(r.headers.get('x-linked-size')), sha = (r.headers.get('x-linked-etag') || '').replace(/"/g, '');
++  if (!size || !/^[0-9a-f]{64}$/.test(sha)) throw new Error(`no size or SHA-256 for ${m.repo}/${m.file} (HTTP ${r.status})`);
++  return { url, size, sha256: sha };
++}
++
++function mapInfo(f) {
++  const b = fs.readFileSync(f); const h = JSON.parse(b.subarray(12, 12 + b.readUInt32LE(8)).toString());
++  const file = path.basename(f);
++  return { id: 'map-' + file.replace(/\.imap$/, ''), name: h.name, file, url: release + file, size: b.length, sha256: crypto.createHash('sha256').update(b).digest('hex'), bbox: h.bbox, houses: h.B || 0, built: h.built,
++    ...(file === 'lesotho.imap' ? { site: 'internot-ai-v0.4/maps/lesotho.imap' } : {}) };
++}
++
++const maps = mapFiles.filter((f) => fs.existsSync(f)).map(mapInfo);
++const models = [];
++for (const m of MODELS) { const { repo, ...rest } = m; models.push({ ...rest, ...(await hfInfo(m)) }); }
++const packs = {
++  updated: new Date().toISOString(),
++  apps: [
++    { id: 'app-lite', name: 'Internot AI for Android (light)', url: REPO + 'internot-ai.apk', note: 'About 150 MB. Lesotho map inside; get other maps and an AI model in the app.' },
++    { id: 'app-full', name: 'Internot AI for Android (full)', url: REPO + 'internot-ai-full.apk', note: 'About 1.3 GB. AI model and the Lesotho, South Africa and Botswana maps inside.' },
++    { id: 'app-web', name: 'Internot AI in the browser (iPhone, computer, any phone)', url: 'https://lesothohousehunters.github.io/internot-ai/internot-ai-v0.4/', note: 'Open once online, then it works offline.' },
++  ],
++  maps, models,
++};
++const same = (a, b) => JSON.stringify({ ...a, updated: 0 }) === JSON.stringify({ ...b, updated: 0 });
++if (!same(packs, old)) fs.writeFileSync(out, JSON.stringify(packs, null, 1) + '\n');
++const oldSha = new Map((old.maps || []).map((m) => [m.file, m.sha256]));
++const assets = new Set((process.env.RELEASE_ASSETS || '').split(/\s+/).filter(Boolean));
++const upload = maps.filter((m) => oldSha.get(m.file) !== m.sha256 || !assets.has(m.file)).map((m) => m.file);
++console.error(JSON.stringify({ maps: maps.map((m) => [m.file, m.size]), models: models.map((m) => [m.file, m.size, m.sha256.slice(0, 12)]), upload }));
++console.log(upload.join(' '));
+diff --git a/android/selftest.js b/android/selftest.js
+index 5b0111c..98c6139 100644
+--- a/android/selftest.js
++++ b/android/selftest.js
+@@ -11,6 +11,12 @@
+     try { log('brain-info', await brainPlugin.info()); } catch (e) { log('brain-info', { error: String(e && e.message || e) }); }
+     log('env', { ua: navigator.userAgent, isolated: self.crossOriginIsolated, webSpeech: 'speechSynthesis' in window, cores: navigator.hardwareConcurrency, memory: navigator.deviceMemory, jspi: 'Suspending' in WebAssembly, core: !!window.capacitorExports, plugins: (window.Capacitor?.PluginHeaders || []).map((h) => h.name) });
+     await shot('first-launch');
++    // the anonymous-count question, asked once on first launch
++    for (let i = 0; i < 40 && document.getElementById('consent')?.hidden !== false; i++) await wait(500);
++    log('consent', { shown: document.getElementById('consent')?.hidden === false, text: (document.querySelector('#consent b') || {}).textContent });
++    await shot('consent');
++    document.getElementById('consent-no')?.click(); await wait(500);
++    log('consent-no', { choice: localStorage.getItem('countChoice'), id: localStorage.getItem('deviceId'), hidden: document.getElementById('consent').hidden });
+     for (let i = 0; i < 600 && !(window.internot && window.internotMap && window.internotMap.map && window.internotMesh); i++) await wait(500);
+     log('map', { name: internotMap.map?.name, stub: !!internotMap.map?.stub, roads: internotMap.map?.W, world: !!internotMap.world });
+     const t1 = performance.now(); for (let i = 0; i < 600 && internot.modelMeta && !internot.loaded; i++) await wait(500);
+@@ -74,6 +80,57 @@
+     } catch (e) { log('docs', { error: String(e && e.stack || e) }); }
+     await shot('docs');
+     tab('model'); await shot('setup');
++    // maps and AI models after install
++    window.confirm = () => true; window.alert = () => {}; window.prompt = () => null;
++    const PK = window.internotPacks, Packs = window.capacitorExports.registerPlugin('Packs');
++    const ask = async (q) => { const t = performance.now(); let f = null; document.getElementById('input').value = q; document.getElementById('composer').requestSubmit();
++      for (let i = 0; i < 1500; i++) { await wait(400); const m = internot.messages.at(-1); if (f == null && m && m.role === 'assistant' && m.content) f = performance.now() - t; if (!internot.generating && i > 2) break; }
++      return { q, firstWordMs: f == null ? null : Math.round(f), totalMs: Math.round(performance.now() - t), answer: (internot.messages.at(-1)?.content || '').slice(0, 400), stats: internot.lastStats || null }; };
++    log('packs', { list: PK.allPacks().map((p) => [p.id, p.size, !!p.sha256, p.url && p.url.slice(0, 60)]), device: PK.P.device, suggested: PK.suggested(), have: [...PK.P.have.keys()] });
++    document.getElementById('pack-list').scrollIntoView(); await shot('setup-packs');
++    { const m = PK.allPacks().find((p) => p.id === 'map-lesotho'); const t = performance.now(); await PK.get(m);
++      const i = await Packs.info(); const got = (i.maps || []).find((x) => x.file === 'lesotho.imap'); let head = null;
++      if (got) { const b = await (await fetch(window.Capacitor.convertFileSrc(got.path))).arrayBuffer(); head = [String.fromCharCode(...new Uint8Array(b, 0, 4)), b.byteLength]; }
++      log('map-download', { ms: Math.round(performance.now() - t), status: document.getElementById('pack-status').textContent, saved: got || null, read: head }); }
++    const small = PK.allPacks().find((p) => p.id === 'model-small');
++    if (small) {
++      const t = performance.now(); const g = PK.get(small); let paused = false;
++      for (let i = 0; i < 1200; i++) { await wait(250); const j = PK.P.jobs.get(small.id); if (j && j.done > small.size * 0.3) { PK.pause(small); paused = true; break; } if (!j && i > 8) break; }
++      await g; const part = (await Packs.partial({ file: small.file })).bytes;
++      log('model-pause', { paused, part, of: small.size, status: document.getElementById('pack-status').textContent });
++      document.getElementById('pack-list').scrollIntoView(); await shot('setup-paused');
++      await PK.get(small);
++      log('model-resume', { ms: Math.round(performance.now() - t), status: document.getElementById('pack-status').textContent, model: internot.modelMeta });
++      tab('chat'); log('chat-small', await ask('What is the capital of Lesotho?'));
++      tab('model'); await wait(500);
++    }
++    const large = PK.allPacks().find((p) => p.id === 'model-large');
++    if (large) {
++      const t = performance.now(); await PK.get(large);
++      log('model-large', { ms: Math.round(performance.now() - t), status: document.getElementById('pack-status').textContent, model: internot.modelMeta });
++      tab('chat'); internot.messages = [];
++      log('chat-large-1', await ask('What is the capital of Lesotho?'));
++      log('chat-large-2', await ask('What is the highest mountain in Lesotho?'));
++      log('chat-large-3', await ask('Which country surrounds Lesotho?'));
++      await shot('brain-large');
++    }
++    // the anonymous count and the server (not online yet during the test)
++    window.internotOnline.decide('yes');
++    log('count', { choice: localStorage.getItem('countChoice'), idLength: (localStorage.getItem('deviceId') || '').length, ping: await window.internotOnline.ping(true), content: await window.internotOnline.fetchContent(true) });
++    window.internotOnline.decide('no');
++    localStorage.setItem('content', JSON.stringify({ ads: [{ id: 1, title: 'Maluti Lodge', body: 'Rooms from M450 a night. Show this app for 10% off.', link_url: 'https://example.com' }] }));
++    tab('chat'); window.internotOnline.showNotice(); await wait(500);
++    log('advert', { shown: !document.getElementById('notice').hidden, text: document.getElementById('notice').textContent });
++    await shot('advert');
++    localStorage.setItem('content', JSON.stringify({ update: { version: '9.9.9', notes: 'Faster maps.', url: 'https://example.com' } })); window.internotOnline.showNotice(); await wait(300);
++    log('update', { text: document.getElementById('notice').textContent }); await shot('update-notice');
++    localStorage.removeItem('content'); window.internotOnline.showNotice();
++    // sharing with no data
++    try { log('peers', await window.capacitorExports.registerPlugin('Nearby').peers()); } catch (e) { log('peers', { error: String(e && e.message || e) }); }
++    try { log('share-path', await Packs.pathFor({ what: 'map', file: 'botswana.imap' })); } catch (e) { log('share-path', { error: String(e && e.message || e) }); }
++    tab('model'); await wait(300); document.getElementById('share-app').click(); await wait(8000);
++    log('share', { status: document.getElementById('share-status').textContent });
++    await shot('share-sheet');
+   } catch (e) { log('failed', String(e && e.stack || e)); }
+   log('done', 1);
+ })();
