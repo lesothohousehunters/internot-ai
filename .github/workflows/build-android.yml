@@ -188,5 +188,5 @@ jobs:
           ls -la *.apk
           gh release delete latest -y --cleanup-tag || true
           mkdir -p test-out && echo "built $(date -u)" > test-out/built.txt
-          ls -la test-out
+          find test-out -type f -size 0 -delete; ls -la test-out
           gh release create latest internot-ai-full.apk internot-ai.apk test-out/* --title "Internot AI for Android" --notes "internot-ai-full.apk: everything inside (AI model Qwen2.5 1.5B, world map, Lesotho street, house and satellite maps, South Africa and Botswana street maps). Install and use with no internet. The Brain answers only from documents saved on the phone. Run tab: records runs and walks with GPS (no internet, keeps recording with the screen off), with splits, height, the route on the map and a 3D replay video. internot-ai.apk: the light app (Lesotho map inside, no AI model); get other maps and an AI model in the app under Setup, Get maps and models. The other files are the automatic test report and screenshots from an Android emulator."
