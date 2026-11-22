@@ -33,9 +33,7 @@
     <div id="notice" class="notice" role="status" hidden></div>
     <div id="messages" class="messages" aria-live="polite"></div>
     <form id="composer" class="composer">
-      <label class="doc-toggle" title="Answer from your saved documents">
-        <input type="checkbox" id="use-docs"> <span>Use my documents</span>
-      </label>
+      <div class="doc-toggle"><input type="checkbox" id="use-docs" checked hidden><span>Answers only from your saved documents</span></div>
       <div class="row">
         <textarea id="input" rows="1" placeholder="Ask The Brain…" autocomplete="off"></textarea>
         <button id="send" type="submit" class="primary">Send</button>
@@ -96,10 +94,44 @@
     <div id="mesh-toast" class="map-msg" hidden></div>
   </section>
 
+  <!-- RUN AND WALK -->
+  <section id="view-run" class="view" aria-label="Run and walk">
+    <div id="run-home">
+      <h2>Run and walk</h2>
+      <div id="run-type" class="seg" role="group" aria-label="Activity"><button id="run-type-run" type="button" class="on">Run</button><button id="run-type-walk" type="button">Walk</button></div>
+      <div id="run-live-stats" class="run-stats"></div>
+      <canvas id="run-trace" class="run-trace" aria-label="Your route so far"></canvas>
+      <p id="run-gps" class="hint" role="status"></p>
+      <div class="row wrap"><button id="run-start" type="button" class="primary run-go">Start</button><button id="run-pause" type="button" class="run-go" hidden>Pause</button><button id="run-finish" type="button" class="primary run-go" hidden>Finish</button></div>
+      <div id="run-history-box">
+        <h2>History</h2>
+        <p id="run-week" class="hint"></p>
+        <p id="run-empty" class="hint">No runs or walks saved yet. Press Start, then Finish when you are done.</p>
+        <ul id="run-list" class="list"></ul>
+      </div>
+    </div>
+    <div id="run-detail" hidden>
+      <button id="run-d-back" type="button">‹ All runs</button>
+      <h2 id="run-d-title"></h2>
+      <div id="run-d-stats" class="run-stats"></div>
+      <canvas id="run-d-trace" class="run-trace" aria-label="Route"></canvas>
+      <div class="row wrap"><button id="run-d-3d" type="button" class="primary">3D replay and video</button><button id="run-d-map" type="button">Show on map</button></div>
+      <div id="run-d-profile-box"><h2>Height</h2><canvas id="run-d-profile" class="run-profile" aria-label="Height along the route"></canvas></div>
+      <h2>Splits</h2>
+      <div id="run-d-splits" class="run-splits"></div>
+      <div class="row wrap"><button id="run-d-delete" type="button" class="danger">Delete</button></div>
+    </div>
+    <div id="run-3d" class="run-3d" hidden>
+      <canvas id="run-3d-canvas" aria-label="3D replay of the route"></canvas>
+      <div class="run-3d-bar"><button id="run-3d-play" type="button">Replay</button><button id="run-3d-video" type="button" class="primary">Save video</button><button id="run-3d-close" type="button">Close</button></div>
+      <p id="run-3d-note" class="hint" role="status"></p>
+    </div>
+  </section>
+
   <!-- DOCUMENTS -->
   <section id="view-docs" class="view" aria-label="Documents">
     <h2>Documents</h2>
-    <p class="hint">Add notes, memos or lesson material. With “Use my documents” switched on, The Brain finds the most relevant passages and answers from them. Add almost any file: Word, PDF, Excel, PowerPoint, text, web pages, and photos or screenshots of printed text. Everything is read on this device.</p>
+    <p class="hint">Add notes, memos or lesson material. The Brain answers only from the documents saved here: it finds the most relevant passages and answers from them. Add almost any file: Word, PDF, Excel, PowerPoint, text, web pages, and photos or screenshots of printed text. Everything is read on this device.</p>
     <div class="card">
       <input id="doc-title" type="text" placeholder="Title (e.g. Grade 7 Science scheme)">
       <textarea id="doc-text" rows="6" placeholder="Paste text here…"></textarea>
@@ -180,6 +212,7 @@
 <nav class="tabs" aria-label="Sections">
   <button data-view="chat" class="active">Brain</button>
   <button data-view="map">Maps</button>
+  <button data-view="run">Run</button>
   <button data-view="mesh">Chat<span id="mesh-badge" class="badge" hidden></span></button>
   <button data-view="docs">Docs</button>
   <button data-view="model">Setup</button>

@@ -5,7 +5,7 @@
 //  • Unlock codes for paid packs.
 // Everything else in the app works the same with No, or with no internet at all.
 export const SERVER = 'https://internot-server.onrender.com';
-export const APP_VERSION = '0.9.0';
+export const APP_VERSION = '0.10.0';
 const $ = (id) => document.getElementById(id);
 const NATIVE = !!window.Capacitor;
 const ls = { get(k, d = null) { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch { return d; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };

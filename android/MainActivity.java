@@ -9,6 +9,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(NearbyPlugin.class);
         registerPlugin(BrainPlugin.class);
         registerPlugin(PacksPlugin.class);
+        registerPlugin(RunPlugin.class);
         super.onCreate(savedInstanceState);
     }
 }

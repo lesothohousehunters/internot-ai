@@ -29,7 +29,7 @@ export function loader(text, frac) {
 window.internotLoader = loader;
 
 const DEFAULTS = {
-  cool: false, unload: true, gpu: false, max: 256, useDocs: false, temp: 0.6,
+  cool: false, unload: true, gpu: false, max: 256, useDocs: true, temp: 0.6,
   system: 'You are The Brain, an offline assistant. Give short, clear answers. If you are not sure, say so.',
 };
 const COOL_BLOCK_TOKENS = 96;   // tokens generated between cool-down pauses
@@ -183,7 +183,8 @@ function warmUp() { if (state.modelMeta && !state.loaded && !state.loading && !d
 
 /* ---------- documents: chunk + keyword retrieval (no network, no embeddings) ---------- */
 const STOP = new Set('the a an and or of to in on for with is are was were be been it this that as at by from not but if then so we you they he she i me my our your their what which who how why when where do does did can could will would should have has had about into over under than too very just also'.split(' '));
-const words = (s) => (s.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) || []).filter((w) => !STOP.has(w));
+const stem = (w) => (w.length > 4 ? w.replace(/(ing|ed|es|s)$/, '') : w);   // 'prices' and 'price' match
+const words = (s) => (s.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) || []).filter((w) => !STOP.has(w)).map(stem);
 function chunkText(text, size = 700, overlap = 120) {
   const clean = text.replace(/\r/g, '').replace(/[ \t]+/g, ' ').trim(); const out = [];
   for (let i = 0; i < clean.length; i += size - overlap) {
@@ -193,7 +194,7 @@ function chunkText(text, size = 700, overlap = 120) {
   }
   return out.filter(Boolean);
 }
-function retrieve(query, k = 3) {
+function retrieve(query, k = 4) {
   const q = [...new Set(words(query))]; if (!q.length) return [];
   const all = state.docs.flatMap((d) => d.chunks.map((c) => ({ title: d.title, text: c, w: words(c) })));
   if (!all.length) return [];
@@ -217,26 +218,30 @@ async function addDoc(title, text, extra = {}) {
 }
 
 /* ---------- chat ---------- */
+// The Brain answers only from the documents saved on this phone. With no documents, or no matching
+// passage, it says so and does not ask the AI model (which would answer from memory and can be wrong).
+const NO_DOCS = 'I answer only from your own documents, and none are saved yet. Open the Docs tab, add a document or a photo of a page, then ask me about it.';
+const NO_MATCH = 'I could not find that in your documents. Try asking with words that appear in the document, or add the document that has the answer.';
+const NOT_IN = 'I could not find that in your documents.';
+const DOC_RULES = `You answer ONLY from the numbered passages below. Never use outside knowledge and never guess. If the passages do not contain the answer, reply exactly: "${NOT_IN}" Otherwise answer in one to three short sentences and give the passage number, for example [1]. Copy names, numbers and dates exactly as written in the passages.`;
+const DOC_TEMP = 0.1;   // low, so the answer sticks to the text
 function buildMessages(question) {
-  let system = state.settings.system.trim();
-  let sources = [];
-  if (state.settings.useDocs) {
-    const hits = retrieve(question);
-    if (hits.length) {
-      sources = [...new Set(hits.map((h) => h.title))];
-      system += '\n\nUse these passages from the user\'s documents to answer. If the answer is not in them, say so.\n\n' +
-        hits.map((h, i) => `[${i + 1}] ${h.title}:\n${h.text}`).join('\n\n');
-    }
-  }
-  const history = state.messages.slice(-6).map(({ role, content }) => ({ role, content })); // keep the prompt small for small phones
-  return { msgs: [{ role: 'system', content: system }, ...history], sources };
+  if (!state.docs.length) return { local: NO_DOCS };
+  const hits = retrieve(question);
+  if (!hits.length) return { local: NO_MATCH };
+  let budget = 3200; const used = [];
+  for (const h of hits) { if (budget <= 0) break; used.push({ ...h, text: h.text.slice(0, budget) }); budget -= h.text.length; }
+  const system = state.settings.system.trim() + '\n\n' + DOC_RULES + '\n\nPassages:\n\n' + used.map((h, i) => `[${i + 1}] ${h.title}:\n${h.text}`).join('\n\n');
+  return { msgs: [{ role: 'system', content: system }, { role: 'user', content: question }], sources: [...new Set(used.map((h) => h.title))], passages: used.map((h, i) => `[${i + 1}] ${h.title}: ${h.text}`) };
 }
 
 async function send(question) {
   if (state.generating) return;
   state.messages.push({ role: 'user', content: question }); renderMessages();
-  const { msgs, sources } = buildMessages(question);
-  const reply = { role: 'assistant', content: '', sources };
+  const built = buildMessages(question);
+  if (built.local) { state.messages.push({ role: 'assistant', content: built.local }); renderMessages(); await writeJSON('chat.json', state.messages); return; }
+  const { msgs, sources, passages } = built;
+  const reply = { role: 'assistant', content: '', sources, passages };
   state.generating = true; state.abort = new AbortController(); toggleBusy(true);
   try {
     await ensureLoaded();
@@ -247,7 +252,7 @@ async function send(question) {
       setStatus('Thinking…', 'busy'); const id = Math.random().toString(36).slice(2);
       state.onPiece = (p) => { if (p.id !== id) return; reply.content += p.text; think.remove(); bubble.firstChild.textContent = reply.content; scrollDown(); };
       state.abort.signal.addEventListener('abort', () => BRAIN.stop().catch(() => {}));
-      try { state.lastStats = await BRAIN.generate({ messages: msgs, maxTokens: maxTotal, temperature: state.settings.temp, id }); }
+      try { state.lastStats = await BRAIN.generate({ messages: msgs, maxTokens: maxTotal, temperature: DOC_TEMP, id }); }
       finally { state.onPiece = null; }
       if (state.abort.signal.aborted) throw Object.assign(new Error('stopped'), { name: 'AbortError' });
     }
@@ -259,7 +264,7 @@ async function send(question) {
       let finish = null; const base = reply.content;
       for (let attempt = 0; ; attempt++) {
         try {
-          const stream = await state.wllama.createChatCompletion({ messages: req, max_tokens: block, temperature: state.settings.temp, stream: true, abortSignal: state.abort.signal });
+          const stream = await state.wllama.createChatCompletion({ messages: req, max_tokens: block, temperature: DOC_TEMP, stream: true, abortSignal: state.abort.signal });
           let round = '';
           for await (const chunk of stream) {
             const c = chunk.choices?.[0]; if (!c) continue;
@@ -289,6 +294,7 @@ async function send(question) {
     else { console.error(e); note('The Brain could not finish: ' + (e?.message || e) + '. If this keeps happening, try a smaller model.'); setStatus('Error', 'err'); await unloadModel(); }
   }
   if (!reply.content) state.messages = state.messages.filter((m) => m !== reply);
+  if (/could not find that in your documents/i.test(reply.content)) { reply.sources = []; reply.passages = []; }   // nothing to point to
   state.generating = false; state.abort = null; toggleBusy(false);
   renderMessages(); await writeJSON('chat.json', state.messages);
 }
@@ -302,13 +308,14 @@ function renderMessages() {
   const box = $('messages'); box.textContent = ''; let last = null;
   if (!state.messages.length) {
     const e = document.createElement('div'); e.className = 'empty';
-    e.innerHTML = '<h1>The Brain</h1><p>An assistant that runs on this device. No data, no airtime, no server.</p>';
+    e.innerHTML = '<h1>The Brain</h1><p>Answers only from your own documents. Save a document in the Docs tab, then ask about it. It runs on this device: no data, no airtime, no server.</p>';
     box.append(e); return null;
   }
   for (const m of state.messages) {
     const el = document.createElement('div'); el.className = 'msg ' + m.role;
     el.append(document.createTextNode(m.content));
     if (m.sources?.length) { const s = document.createElement('span'); s.className = 'sources'; s.textContent = 'From: ' + m.sources.join(', '); el.append(s); }
+    if (m.passages?.length) { const d = document.createElement('details'); d.className = 'passages'; const su = document.createElement('summary'); su.textContent = 'Show the text I used'; const pre = document.createElement('pre'); pre.textContent = m.passages.join('\n\n'); d.append(su, pre); el.append(d); }
     box.append(el); last = el;
   }
   scrollDown(); return last;
@@ -444,6 +451,7 @@ async function registerSW() {
       if (handle.move) await handle.move(MODEL_FILE); else { const dst = await (await rootDir.getFileHandle(MODEL_FILE, { create: true })).createWritable(); await (await handle.getFile()).stream().pipeTo(dst); await rootDir.removeEntry(handle.name); }
       state.modelMeta = { name, size }; state.sessionBlob = null; await writeJSON('model.json', state.modelMeta); renderModel(); } };
   import('./packs.js').then((m) => m.initPacks(hooks)).catch((e) => console.error('downloads failed to start', e));
+  import('./run.js').then((m) => m.initRun(rootDir)).catch((e) => console.error('run and walk failed to start', e));
   import('./online.js').then((m) => m.initOnline()).catch((e) => console.error('online features failed to start', e));
   registerSW();
   loader(null);

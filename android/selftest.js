@@ -22,16 +22,11 @@
     const t1 = performance.now(); for (let i = 0; i < 600 && internot.modelMeta && !internot.loaded; i++) await wait(500);
     log('model', { meta: internot.modelMeta, loaded: internot.loaded, loadMs: Math.round(performance.now() - t1), status: document.getElementById('status').textContent });
     await shot('brain-ready');
-    const t0 = performance.now(); let first = null;
-    document.getElementById('input').value = 'What is the capital of Lesotho?'; document.getElementById('composer').requestSubmit();
-    for (let i = 0; i < 700; i++) { await wait(500); const m = internot.messages.at(-1); if (first == null && m && m.role === 'assistant' && m.content) first = performance.now() - t0; if (!internot.generating && i > 2) break; }
-    const last = internot.messages.at(-1) || {};
-    log('chat', { firstWordMs: first == null ? null : Math.round(first), totalMs: Math.round(performance.now() - t0), role: last.role, answer: (last.content || '').slice(0, 600), status: document.getElementById('status').textContent });
-    await shot('brain-answer');
-    log('engine', { native: !!internot.native, loadInfo: internot.loadInfo || null, stats: internot.lastStats || null });
-    { const t2 = performance.now(); let f2 = null; document.getElementById('input').value = 'Name one mountain there.'; document.getElementById('composer').requestSubmit();
-      for (let i = 0; i < 700; i++) { await wait(300); const m = internot.messages.at(-1); if (f2 == null && m && m.role === 'assistant' && m.content) f2 = performance.now() - t2; if (!internot.generating && i > 2) break; }
-      log('chat2', { firstWordMs: f2 == null ? null : Math.round(f2), totalMs: Math.round(performance.now() - t2), answer: (internot.messages.at(-1)?.content || '').slice(0, 300), stats: internot.lastStats || null }); }
+    // The Brain answers only from saved documents: with none saved it says so and does not ask the AI
+    document.getElementById('input').value = 'What is the capital of Lesotho?'; document.getElementById('composer').requestSubmit(); await wait(1500);
+    log('chat-no-docs', { answer: (internot.messages.at(-1) || {}).content, generating: internot.generating });
+    await shot('brain-no-docs');
+    log('engine', { native: !!internot.native, loadInfo: internot.loadInfo || null });
     tab('map'); await wait(1500);
     const find = (n) => internotMap.map.placeList.find((p) => p.lower === n); const a = find('maseru'), b = find('mafeteng');
     const ok = !!(a && b && internotMap.api.makeRoute(a, b)); if (ok) { internotMap.view.cx = (a.x + b.x) / 2; internotMap.view.cy = (a.y + b.y) / 2; internotMap.view.z = 9.5; internotMap.api.paint(); }
@@ -58,6 +53,24 @@
       await wait(1500); await shot('map-' + file.split('.')[0]); internotMap.route = null;
     }
     { const l = internotMap.api.builtIns()[0]; if (l) await internotMap.api.switchBuiltIn(l); }
+    // Run and walk: the test script feeds GPS positions once it sees run-start, and turns the screen off for a while
+    { window.confirm = () => true; const RR = window.internotRun; tab('run'); await wait(800); await shot('run-home');
+      document.getElementById('run-type-run').click(); document.getElementById('run-start').click(); await wait(2000);
+      log('run-start', { live: !!RR.R.live, gps: document.getElementById('run-gps').textContent });
+      let last = -1, still = 0;
+      for (let i = 0; i < 260; i++) { await wait(2000); const n = RR.R.live ? RR.R.live.pts.length : -1; if (i === 30) await shot('run-recording');
+        if (i === 45 && RR.R.live) { RR.pause(); await wait(6000); RR.pause(); log('run-paused-resumed', { state: RR.R.live.state, seg: RR.R.live.seg }); }
+        if (n === last) still++; else still = 0; last = n; if (n > 150 && still >= 6) break; }
+      const L = RR.R.live; const a = L ? RR.analyse(L.pts, L.type) : null;
+      log('run-recorded', { pts: L && L.pts.length, segments: L && [...new Set(L.pts.map((p) => p[6]))], gapDuringScreenOff: L && Math.max(...L.pts.slice(1).map((p, i) => p[0] - L.pts[i][0])) / 1000, km: a && +(a.dist / 1000).toFixed(3), moving: a && Math.round(a.moving), pace: a && Math.round(a.pace), gain: a && a.gain, stats: document.getElementById('run-live-stats').innerText.replace(/\n/g, ' ') });
+      await RR.finish(); await wait(1500);
+      log('run-saved', { list: RR.R.list, title: document.getElementById('run-d-title').textContent, stats: document.getElementById('run-d-stats').innerText.replace(/\n/g, ' '), splits: document.getElementById('run-d-splits').innerText.replace(/\n/g, ' ').slice(0, 300) });
+      await shot('run-detail');
+      RR.showOnMap(); await wait(3000); log('run-map', { track: internotMap.track && internotMap.track.length, z: internotMap.view.z, chip: !!document.getElementById('run-map-chip') }); await shot('run-on-map'); RR.mapChip(false);
+      tab('run'); await wait(500); RR.open3d(); await wait(8000); log('run-3d', { roads: RR.R.scene && RR.R.scene.roads.length, height: RR.R.scene && RR.R.scene.ex }); await shot('run-3d');
+      const v = RR.saveVideo(); for (let i = 0; i < 60 && !RR.R.lastVideo; i++) await wait(1000); await wait(4000);
+      log('run-video', { video: RR.R.lastVideo || null, note: document.getElementById('run-3d-note').textContent }); await shot('run-video-share');
+      log('run-back', 1); await wait(3000); await v.catch(() => {}); document.getElementById('run-3d-close').click(); RR.closeRun(); }
     // a location pasted from WhatsApp
     const box = document.getElementById('map-search'); box.value = 'https://maps.google.com/maps?q=-29.31678%2C27.48226&z=17&hl=en'; box.dispatchEvent(new Event('input'));
     await wait(400); document.querySelector('#map-results li')?.click(); await wait(1500);
@@ -79,13 +92,17 @@
       log('docs', { ms: Math.round(performance.now() - td), status: document.getElementById('doc-status').textContent, docs: internot.docs.map((d) => [d.title + '.' + d.kind, d.chars, !!d.thumb, d.chunks[0].slice(0, 50)]) });
     } catch (e) { log('docs', { error: String(e && e.stack || e) }); }
     await shot('docs');
-    tab('model'); await shot('setup');
-    // maps and AI models after install
     window.confirm = () => true; window.alert = () => {}; window.prompt = () => null;
-    const PK = window.internotPacks, Packs = window.capacitorExports.registerPlugin('Packs');
     const ask = async (q) => { const t = performance.now(); let f = null; document.getElementById('input').value = q; document.getElementById('composer').requestSubmit();
       for (let i = 0; i < 1500; i++) { await wait(400); const m = internot.messages.at(-1); if (f == null && m && m.role === 'assistant' && m.content) f = performance.now() - t; if (!internot.generating && i > 2) break; }
-      return { q, firstWordMs: f == null ? null : Math.round(f), totalMs: Math.round(performance.now() - t), answer: (internot.messages.at(-1)?.content || '').slice(0, 400), stats: internot.lastStats || null }; };
+      const m = internot.messages.at(-1) || {}; return { q, firstWordMs: f == null ? null : Math.round(f), totalMs: Math.round(performance.now() - t), answer: (m.content || '').slice(0, 400), sources: m.sources || null, passages: (m.passages || []).length }; };
+    const DOCQ = ['When does the Roma clinic open?', 'What is the name of the nurse?', 'How much is a 10kg bag of maize meal?', 'How long should river water be boiled?', 'What is the capital of France?', 'What time does the Roma clinic close?'];
+    tab('chat'); internot.messages = [];
+    for (const q of DOCQ) log('docq-built-in', await ask(q));
+    await shot('brain-docs');
+    tab('model'); await shot('setup');
+    // maps and AI models after install
+    const PK = window.internotPacks, Packs = window.capacitorExports.registerPlugin('Packs');
     log('packs', { list: PK.allPacks().map((p) => [p.id, p.size, !!p.sha256, p.url && p.url.slice(0, 60)]), device: PK.P.device, suggested: PK.suggested(), have: [...PK.P.have.keys()] });
     document.getElementById('pack-list').scrollIntoView(); await shot('setup-packs');
     { const m = PK.allPacks().find((p) => p.id === 'map-lesotho'); const t = performance.now(); await PK.get(m);
@@ -101,7 +118,7 @@
       document.getElementById('pack-list').scrollIntoView(); await shot('setup-paused');
       await PK.get(small);
       log('model-resume', { ms: Math.round(performance.now() - t), status: document.getElementById('pack-status').textContent, model: internot.modelMeta });
-      tab('chat'); log('chat-small', await ask('What is the capital of Lesotho?'));
+      tab('chat'); internot.messages = []; for (const q of DOCQ.slice(0, 4)) log('docq-small', await ask(q));
       tab('model'); await wait(500);
     }
     const large = PK.allPacks().find((p) => p.id === 'model-large');
@@ -109,9 +126,7 @@
       const t = performance.now(); await PK.get(large);
       log('model-large', { ms: Math.round(performance.now() - t), status: document.getElementById('pack-status').textContent, model: internot.modelMeta });
       tab('chat'); internot.messages = [];
-      log('chat-large-1', await ask('What is the capital of Lesotho?'));
-      log('chat-large-2', await ask('What is the highest mountain in Lesotho?'));
-      log('chat-large-3', await ask('Which country surrounds Lesotho?'));
+      for (const q of DOCQ) log('docq-large', await ask(q));
       await shot('brain-large');
     }
     // the anonymous count and the server (not online yet during the test)
