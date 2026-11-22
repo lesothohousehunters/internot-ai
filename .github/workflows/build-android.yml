@@ -117,18 +117,20 @@ jobs:
           grep -c capacitor.js www/index.html
           npx cap init "Internot AI" org.internot.app --web-dir www
           npx cap add android
-          cp ../android/MainActivity.java ../android/NearbyPlugin.java ../android/BrainPlugin.java ../android/PacksPlugin.java android/app/src/main/java/org/internot/app/
+          cp ../android/MainActivity.java ../android/NearbyPlugin.java ../android/BrainPlugin.java ../android/PacksPlugin.java ../android/RunPlugin.java ../android/RunService.java android/app/src/main/java/org/internot/app/
           mkdir -p android/app/src/main/res/xml
           printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<paths xmlns:android="http://schemas.android.com/apk/res/android">' '<external-path name="my_images" path="." />' '<cache-path name="my_cache_images" path="." />' '<files-path name="files" path="." />' '<root-path name="root" path="." />' '</paths>' > android/app/src/main/res/xml/file_paths.xml
           grep -q 'fileprovider' android/app/src/main/AndroidManifest.xml || sed -i 's#</application>#<provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths"/></provider></application>#' android/app/src/main/AndroidManifest.xml
           grep -c fileprovider android/app/src/main/AndroidManifest.xml
+          grep -q 'RunService' android/app/src/main/AndroidManifest.xml || sed -i 's#</application>#<service android:name=".RunService" android:exported="false" android:foregroundServiceType="location"/></application>#' android/app/src/main/AndroidManifest.xml
+          grep -c RunService android/app/src/main/AndroidManifest.xml
           NDKV=$(ls $ANDROID_HOME/ndk | sort -V | tail -1); CMV=$(ls $ANDROID_HOME/cmake | sort -V | tail -1); echo "NDK $NDKV CMake $CMV"
           sed -i "s#^android {#android {\n    ndkVersion \"$NDKV\"\n    externalNativeBuild { cmake { path \"../../../android/brain/CMakeLists.txt\"; version \"$CMV\" } }\n    defaultConfig { ndk { abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64' }; externalNativeBuild { cmake { arguments '-DANDROID_STL=c++_static', '-DCMAKE_BUILD_TYPE=Release'; cppFlags '-O3' } } }\n    packagingOptions { jniLibs { useLegacyPackaging true } }#" android/app/build.gradle
           head -20 android/app/build.gradle
           sed -i 's#^dependencies {#dependencies {\n    implementation "com.google.android.gms:play-services-nearby:19.3.0"#' android/app/build.gradle
           M=android/app/src/main/AndroidManifest.xml
           P='<uses-permission android:name="android.permission.'
-          sed -i "s#<application#${P}CAMERA\"/>${P}ACCESS_FINE_LOCATION\"/>${P}ACCESS_COARSE_LOCATION\"/>${P}WAKE_LOCK\"/>${P}CHANGE_WIFI_MULTICAST_STATE\"/>${P}BLUETOOTH\"/>${P}BLUETOOTH_ADMIN\"/>${P}BLUETOOTH_SCAN\"/>${P}BLUETOOTH_ADVERTISE\"/>${P}BLUETOOTH_CONNECT\"/>${P}NEARBY_WIFI_DEVICES\"/>${P}ACCESS_WIFI_STATE\"/>${P}CHANGE_WIFI_STATE\"/><uses-feature android:name=\"android.hardware.camera\" android:required=\"false\"/><application#" $M
+          sed -i "s#<application#${P}CAMERA\"/>${P}ACCESS_FINE_LOCATION\"/>${P}ACCESS_COARSE_LOCATION\"/>${P}WAKE_LOCK\"/>${P}CHANGE_WIFI_MULTICAST_STATE\"/>${P}BLUETOOTH\"/>${P}BLUETOOTH_ADMIN\"/>${P}BLUETOOTH_SCAN\"/>${P}BLUETOOTH_ADVERTISE\"/>${P}BLUETOOTH_CONNECT\"/>${P}NEARBY_WIFI_DEVICES\"/>${P}ACCESS_WIFI_STATE\"/>${P}CHANGE_WIFI_STATE\"/>${P}FOREGROUND_SERVICE\"/>${P}FOREGROUND_SERVICE_LOCATION\"/>${P}POST_NOTIFICATIONS\"/><uses-feature android:name=\"android.hardware.camera\" android:required=\"false\"/><application#" $M
           sed -i 's#^android {#android {\n    androidResources { noCompress += ["gguf", "imap"] }#' android/app/build.gradle
           R=android/app/src/main/res
           rm -rf $R/mipmap-anydpi-v26
@@ -167,7 +169,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - name: Run the app on an Android emulator
         continue-on-error: true
-        timeout-minutes: 95
+        timeout-minutes: 115
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -187,4 +189,4 @@ jobs:
           gh release delete latest -y --cleanup-tag || true
           mkdir -p test-out && echo "built $(date -u)" > test-out/built.txt
           ls -la test-out
-          gh release create latest internot-ai-full.apk internot-ai.apk test-out/* --title "Internot AI for Android" --notes "internot-ai-full.apk: everything inside (AI model Qwen2.5 1.5B, world map, Lesotho street, house and satellite maps, South Africa and Botswana street maps). Install and use with no internet. internot-ai.apk: the light app (Lesotho map inside, no AI model); get other maps and an AI model in the app under Setup, Get maps and models. The other files are the automatic test report and screenshots from an Android emulator."
+          gh release create latest internot-ai-full.apk internot-ai.apk test-out/* --title "Internot AI for Android" --notes "internot-ai-full.apk: everything inside (AI model Qwen2.5 1.5B, world map, Lesotho street, house and satellite maps, South Africa and Botswana street maps). Install and use with no internet. The Brain answers only from documents saved on the phone. Run tab: records runs and walks with GPS (no internet, keeps recording with the screen off), with splits, height, the route on the map and a 3D replay video. internot-ai.apk: the light app (Lesotho map inside, no AI model); get other maps and an AI model in the app under Setup, Get maps and models. The other files are the automatic test report and screenshots from an Android emulator."
