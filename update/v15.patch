@@ -1,0 +1,1616 @@
+diff --git a/android/RunPlugin.java b/android/RunPlugin.java
+index 841d08d..fa17529 100644
+--- a/android/RunPlugin.java
++++ b/android/RunPlugin.java
+@@ -24,6 +24,7 @@ import java.io.FileOutputStream;
+ import java.util.ArrayList;
+ import java.util.List;
+ import org.json.JSONArray;
++import org.json.JSONObject;
+ 
+ /** Run tab: GPS recording that keeps going with the screen off, and saving a replay video. */
+ @CapacitorPlugin(name = "Run", permissions = {
+@@ -53,6 +54,7 @@ public class RunPlugin extends Plugin {
+         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(getContext(), "android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+             try { ActivityCompat.requestPermissions(getActivity(), new String[] { "android.permission.POST_NOTIFICATIONS" }, 4107); } catch (Exception ignored) { }
+         }
++        try { JSObject c = call.getObject("coach", null); RunService.coach = c == null ? null : new JSONObject(c.toString()); } catch (Exception e) { RunService.coach = null; }
+         if (!RunService.running) {
+             RunService.prepare(getContext(), call.getBoolean("keep", false));
+             ContextCompat.startForegroundService(getContext(), new Intent(getContext(), RunService.class));
+@@ -62,11 +64,11 @@ public class RunPlugin extends Plugin {
+     }
+ 
+     @PluginMethod
+-    public void pause(PluginCall call) { RunService.paused = true; call.resolve(state()); }
++    public void pause(PluginCall call) { RunService.paused = true; RunService i = RunService.instance; if (i != null) i.sayPause(true); call.resolve(state()); }
+ 
+     @PluginMethod
+     public void resume(PluginCall call) {
+-        if (RunService.paused) { RunService.segment++; RunService.paused = false; }
++        if (RunService.paused) { RunService.segment++; RunService.paused = false; RunService i = RunService.instance; if (i != null) i.sayPause(false); }
+         call.resolve(state());
+     }
+ 
+@@ -87,6 +89,10 @@ public class RunPlugin extends Plugin {
+     @PluginMethod
+     public void status(PluginCall call) { call.resolve(state()); }
+ 
++    /** Speak a line through the recorder's voice (used for the finish and for new records). */
++    @PluginMethod
++    public void say(PluginCall call) { RunService i = RunService.instance; if (i != null) i.say(call.getString("text", "")); call.resolve(); }
++
+     private JSObject state() {
+         JSObject o = new JSObject();
+         o.put("running", RunService.running);
+@@ -96,6 +102,7 @@ public class RunPlugin extends Plugin {
+         o.put("lastFix", RunService.lastFix);
+         o.put("accuracy", RunService.lastAccuracy);
+         o.put("error", RunService.error);
++        o.put("said", RunService.lastSaid);
+         return o;
+     }
+ 
+@@ -133,7 +140,7 @@ public class RunPlugin extends Plugin {
+             send.setType(call.getString("type", "video/webm"));
+             send.putExtra(Intent.EXTRA_STREAM, uri);
+             send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+-            Intent chooser = Intent.createChooser(send, "Share your run video");
++            Intent chooser = Intent.createChooser(send, call.getString("title", "Share your run video"));
+             chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+             getContext().startActivity(chooser);
+             JSObject o = new JSObject(); o.put("path", f.getAbsolutePath()); o.put("bytes", f.length());
+diff --git a/android/RunService.java b/android/RunService.java
+index 4cb17fb..9d9d93a 100644
+--- a/android/RunService.java
++++ b/android/RunService.java
+@@ -16,6 +16,10 @@ import android.os.Bundle;
+ import android.os.IBinder;
+ import android.os.Looper;
+ import android.os.PowerManager;
++import android.speech.tts.TextToSpeech;
++import java.util.Locale;
++import org.json.JSONArray;
++import org.json.JSONObject;
+ import androidx.core.app.NotificationCompat;
+ import androidx.core.app.ServiceCompat;
+ import java.io.BufferedReader;
+@@ -34,6 +38,15 @@ import java.util.List;
+  */
+ public class RunService extends Service implements LocationListener {
+ 
++    /** Voice coach settings, set by the app before a run (null = no voice). */
++    static volatile JSONObject coach = null;
++    static volatile String lastSaid = "";
++    // the coach's own running totals (same filters as the app: poor fixes and GPS jumps are skipped)
++    private double cDist = 0, cMoving = 0, nextDist = 0, nextTime = 0; private double[] cPrev = null; private boolean goalSaid = false, halfSaid = false;
++    private final ArrayList<double[]> win = new ArrayList<>();
++    private int ivIndex = -1; private double ivStartDist = 0, ivStartTime = 0;
++    private TextToSpeech tts; private boolean ttsReady = false;
++
+     static final List<double[]> points = Collections.synchronizedList(new ArrayList<>());
+     static volatile boolean running = false;
+     static volatile boolean paused = false;
+@@ -106,6 +119,10 @@ public class RunService extends Service implements LocationListener {
+         PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+         if (pm != null) { wake = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "internot:run"); wake.acquire(6L * 60 * 60 * 1000); }
+         try { out = new FileWriter(file(this), true); } catch (Exception e) { out = null; }
++        try { tts = new TextToSpeech(this, (st) -> { ttsReady = st == TextToSpeech.SUCCESS; if (ttsReady) { try { tts.setLanguage(Locale.UK); } catch (Exception ignored) { } coachStart(); } }); } catch (Exception e) { tts = null; }
++        // carry on the coach's totals when an interrupted run is continued
++        synchronized (points) { for (double[] p : points) coachStep(p, false); }
++        instance = this;
+         lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+         try {
+             lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this, Looper.getMainLooper());
+@@ -129,6 +146,7 @@ public class RunService extends Service implements LocationListener {
+                 l.hasAltitude() ? l.getAltitude() : -9999, l.hasAccuracy() ? l.getAccuracy() : -1,
+                 l.hasSpeed() ? l.getSpeed() : -1, segment };
+         points.add(p);
++        coachStep(p, true);
+         if (out != null) {
+             try {
+                 StringBuilder b = new StringBuilder();
+@@ -144,13 +162,107 @@ public class RunService extends Service implements LocationListener {
+ 
+     @Override
+     public void onDestroy() {
+-        running = false;
++        running = false; instance = null;
+         try { if (lm != null) lm.removeUpdates(this); } catch (Exception ignored) { }
+         try { if (out != null) out.close(); } catch (Exception ignored) { }
+         try { if (wake != null && wake.isHeld()) wake.release(); } catch (Exception ignored) { }
++        try { if (tts != null) tts.shutdown(); } catch (Exception ignored) { }
+         super.onDestroy();
+     }
+ 
++
++    /* ---------------- voice coach ---------------- */
++    static double hav(double la1, double lo1, double la2, double lo2) {
++        double r = Math.PI / 180, dLa = (la2 - la1) * r, dLo = (lo2 - lo1) * r;
++        double h = Math.sin(dLa / 2) * Math.sin(dLa / 2) + Math.cos(la1 * r) * Math.cos(la2 * r) * Math.sin(dLo / 2) * Math.sin(dLo / 2);
++        return 2 * 6371008.8 * Math.asin(Math.min(1, Math.sqrt(h)));
++    }
++    static String clock(double s) {
++        long t = Math.round(s), h = t / 3600, m = (t / 60) % 60, x = t % 60;
++        String out = "";
++        if (h > 0) out += h + (h == 1 ? " hour " : " hours ");
++        if (m > 0 || h > 0) out += m + (m == 1 ? " minute " : " minutes ");
++        if (h == 0) out += x + (x == 1 ? " second" : " seconds");
++        return out.trim();
++    }
++    static String pace(double secPerKm) {
++        if (!(secPerKm > 0) || secPerKm > 3600) return "";
++        long t = Math.round(secPerKm); return (t / 60) + " " + String.format(Locale.UK, "%02d", t % 60) + " per kilometre";
++    }
++    static String km(double m) {
++        double k = m / 1000; if (Math.abs(k - Math.round(k)) < 0.005) { long n = Math.round(k); return n + (n == 1 ? " kilometre" : " kilometres"); }
++        return String.format(Locale.UK, "%.1f kilometres", k);
++    }
++    void say(String text) {
++        lastSaid = text;
++        if (tts != null && ttsReady) { try { tts.speak(text, TextToSpeech.QUEUE_ADD, null, "run" + System.nanoTime()); } catch (Exception ignored) { } }
++    }
++    private JSONArray intervals() { JSONObject c = coach; return c == null ? null : c.optJSONArray("intervals"); }
++    private void coachStart() {
++        JSONObject c = coach; if (c == null) return;
++        if (points.isEmpty()) {
++            String hello = c.optString("hello", ""); if (!hello.isEmpty()) say(hello);
++            JSONArray iv = intervals(); if (iv != null && iv.length() > 0) { ivIndex = 0; ivStartDist = cDist; ivStartTime = cMoving; say(iv.optJSONObject(0).optString("say", "")); }
++        }
++    }
++    /** Called for every fix: keeps the totals and speaks when a mark is passed. */
++    private void coachStep(double[] p, boolean speak) {
++        JSONObject c = coach; if (c == null) return;
++        double maxSpeed = c.optDouble("maxSpeed", 12);
++        if (p[4] > 40) return;
++        if (cPrev != null && cPrev[6] == p[6]) {
++            double dt = (p[0] - cPrev[0]) / 1000; if (dt <= 0) return;
++            double d = hav(cPrev[1], cPrev[2], p[1], p[2]);
++            if (d / dt > maxSpeed) return;
++            // standing still = slower than `still` m/s over the last 10 seconds (auto-pause), the same rule as the app
++            while (win.size() > 1 && p[0] - win.get(1)[0] >= 10000) win.remove(0);
++            double[] w0 = win.isEmpty() ? cPrev : win.get(0);
++            double span = (p[0] - w0[0]) / 1000, v = span > 0 ? hav(w0[1], w0[2], p[1], p[2]) / span : 0;
++            if (span < 3 || v >= c.optDouble("still", 0.5)) { cDist += d; cMoving += Math.min(60, dt); }
++            win.add(p);
++        } else { win.clear(); win.add(p); }
++        cPrev = p;
++        if (!speak) { double e = c.optDouble("everyM", 0); nextDist = e > 0 ? (Math.floor(cDist / e) + 1) * e : 0; double t = c.optDouble("everyS", 0); nextTime = t > 0 ? (Math.floor(cMoving / t) + 1) * t : 0; return; }
++        double everyM = c.optDouble("everyM", 0), everyS = c.optDouble("everyS", 0);
++        boolean mark = false;
++        if (everyM > 0) { if (nextDist <= 0) nextDist = everyM; if (cDist >= nextDist) { mark = true; while (nextDist <= cDist) nextDist += everyM; } }
++        if (everyS > 0) { if (nextTime <= 0) nextTime = everyS; if (cMoving >= nextTime) { mark = true; while (nextTime <= cMoving) nextTime += everyS; } }
++        if (mark) {
++            StringBuilder b = new StringBuilder();
++            b.append(km(Math.floor(cDist / 10) * 10)).append(". Time ").append(clock(cMoving)).append(".");
++            String pc = pace(cDist > 50 ? cMoving / (cDist / 1000) : 0); if (!pc.isEmpty() && c.optBoolean("pace", true)) b.append(" Average pace ").append(pc).append(".");
++            say(b.toString()); updateNotice();
++        }
++        double goalM = c.optDouble("goalM", 0), goalS = c.optDouble("goalS", 0);
++        if (!halfSaid && ((goalM > 0 && cDist >= goalM / 2) || (goalS > 0 && cMoving >= goalS / 2))) { halfSaid = true; say("Halfway to your goal."); }
++        if (!goalSaid && ((goalM > 0 && cDist >= goalM) || (goalS > 0 && cMoving >= goalS))) { goalSaid = true; say("Goal reached. Well done!"); }
++        JSONArray iv = intervals();
++        if (iv != null && ivIndex >= 0 && ivIndex < iv.length()) {
++            JSONObject step = iv.optJSONObject(ivIndex);
++            double m = step.optDouble("m", 0), s = step.optDouble("s", 0);
++            boolean done = (m > 0 && cDist - ivStartDist >= m) || (s > 0 && (cMoving - ivStartTime) >= s);
++            if (done) {
++                ivIndex++; ivStartDist = cDist; ivStartTime = cMoving;
++                if (ivIndex < iv.length()) say(iv.optJSONObject(ivIndex).optString("say", ""));
++                else say(c.optString("ivDone", "Workout complete. Well done! You can walk to cool down."));
++            }
++        }
++    }
++    private void updateNotice() {
++        try {
++            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
++            Intent open = new Intent(this, MainActivity.class); open.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
++            PendingIntent pi = PendingIntent.getActivity(this, 0, open, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
++            Notification n = new NotificationCompat.Builder(this, "run").setSmallIcon(android.R.drawable.ic_menu_mylocation)
++                    .setContentTitle("Internot AI is recording").setContentText(String.format(Locale.UK, "%.2f km · %s", cDist / 1000, clock(cMoving)))
++                    .setOngoing(true).setOnlyAlertOnce(true).setContentIntent(pi).setPriority(NotificationCompat.PRIORITY_LOW).build();
++            if (nm != null) nm.notify(41, n);
++        } catch (Exception ignored) { }
++    }
++    /** Pause and resume, said out loud. */
++    void sayPause(boolean paused) { if (coach != null) say(paused ? "Paused." : "Resumed."); }
++    static RunService instance;
++
+     @Override
+     public IBinder onBind(Intent intent) { return null; }
+ }
+diff --git a/android/emulator-test.sh b/android/emulator-test.sh
+index ec36611..150db35 100644
+--- a/android/emulator-test.sh
++++ b/android/emulator-test.sh
+@@ -35,7 +35,8 @@ P
+ }
+ feed &
+ # The run video opens the share menu: close it again
+-( for i in $(seq 1 2400); do adb logcat -d 2>/dev/null | grep -q "INTERNOT-TEST run-back" && { adb shell input keyevent KEYCODE_BACK < /dev/null; break; }; sleep 2; done ) &
++( for i in $(seq 1 2400); do adb logcat -d 2>/dev/null | grep -q "INTERNOT-TEST run-back " && { adb shell input keyevent KEYCODE_BACK < /dev/null; break; }; sleep 2; done ) &
++( for i in $(seq 1 2600); do adb logcat -d 2>/dev/null | grep -q "INTERNOT-TEST run-back2" && { adb shell input keyevent KEYCODE_BACK < /dev/null; break; }; sleep 2; done ) &
+ 
+ seen=0
+ for i in $(seq 1 3200); do
+diff --git a/android/selftest.js b/android/selftest.js
+index 6441731..7053a00 100644
+--- a/android/selftest.js
++++ b/android/selftest.js
+@@ -12,7 +12,7 @@
+     log('env', { ua: navigator.userAgent, isolated: self.crossOriginIsolated, webSpeech: 'speechSynthesis' in window, cores: navigator.hardwareConcurrency, memory: navigator.deviceMemory, jspi: 'Suspending' in WebAssembly, core: !!window.capacitorExports, plugins: (window.Capacitor?.PluginHeaders || []).map((h) => h.name) });
+     await shot('first-launch');
+     // the anonymous-count question, asked once on first launch
+-    for (let i = 0; i < 40 && document.getElementById('consent')?.hidden !== false; i++) await wait(500);
++    for (let i = 0; i < 240 && document.getElementById('consent')?.hidden !== false; i++) await wait(500);
+     log('consent', { shown: document.getElementById('consent')?.hidden === false, text: (document.querySelector('#consent b') || {}).textContent });
+     await shot('consent');
+     document.getElementById('consent-no')?.click(); await wait(500);
+@@ -54,23 +54,41 @@
+     }
+     { const l = internotMap.api.builtIns()[0]; if (l) await internotMap.api.switchBuiltIn(l); }
+     // Run and walk: the test script feeds GPS positions once it sees run-start, and turns the screen off for a while
+-    { window.confirm = () => true; const RR = window.internotRun; tab('run'); await wait(800); await shot('run-home');
+-      document.getElementById('run-type-run').click(); document.getElementById('run-start').click(); await wait(2000);
++    { window.confirm = () => true; window.alert = () => {}; const RR = window.internotRun; tab('run'); await wait(800);
++      RR.saveSettings({ weight: 68, height: 175, voice: true, every: '500', autoPause: true, weekGoal: 10, monthGoal: 40 });
++      RR.pickType('run'); document.getElementById('run-goal').value = 'd3'; await shot('run-home');
++      document.getElementById('run-start').click(); await wait(2000);
+       log('run-start', { live: !!RR.R.live, gps: document.getElementById('run-gps').textContent });
+-      let last = -1, still = 0;
+-      for (let i = 0; i < 260; i++) { await wait(2000); const n = RR.R.live ? RR.R.live.pts.length : -1; if (i === 30) await shot('run-recording');
++      let last = -1, still = 0, said = new Set();
++      for (let i = 0; i < 300; i++) { await wait(2000); const n = RR.R.live ? RR.R.live.pts.length : -1; if (RR.R.live?.said) said.add(RR.R.live.said); if (i === 30) await shot('run-recording');
+         if (i === 45 && RR.R.live) { RR.pause(); await wait(6000); RR.pause(); log('run-paused-resumed', { state: RR.R.live.state, seg: RR.R.live.seg }); }
+         if (n === last) still++; else still = 0; last = n; if (n > 150 && still >= 6) break; }
+-      const L = RR.R.live; const a = L ? RR.analyse(L.pts, L.type) : null;
+-      log('run-recorded', { pts: L && L.pts.length, segments: L && [...new Set(L.pts.map((p) => p[6]))], gapDuringScreenOff: L && Math.max(...L.pts.slice(1).map((p, i) => p[0] - L.pts[i][0])) / 1000, km: a && +(a.dist / 1000).toFixed(3), moving: a && Math.round(a.moving), pace: a && Math.round(a.pace), gain: a && a.gain, stats: document.getElementById('run-live-stats').innerText.replace(/\n/g, ' ') });
++      const L = RR.R.live; const a = L ? RR.analyse(L.pts, L.type, RR.settings()) : null;
++      log('run-recorded', { pts: L && L.pts.length, segments: L && [...new Set(L.pts.map((p) => p[6]))], gapDuringScreenOff: L && Math.max(...L.pts.slice(1).map((p, i) => p[0] - L.pts[i][0])) / 1000, km: a && +(a.dist / 1000).toFixed(3), moving: a && Math.round(a.moving), elapsed: a && Math.round(a.elapsed), pace: a && Math.round(a.pace), gain: a && a.gain, kcal: a && RR.kcal(a, 'run', 68), stats: document.getElementById('run-live-stats').innerText.replace(/\n/g, ' '), goal: document.getElementById('run-goalbar-text').textContent });
++      log('run-voice', { said: [...said] });
+       await RR.finish(); await wait(1500);
+-      log('run-saved', { list: RR.R.list, title: document.getElementById('run-d-title').textContent, stats: document.getElementById('run-d-stats').innerText.replace(/\n/g, ' '), splits: document.getElementById('run-d-splits').innerText.replace(/\n/g, ' ').slice(0, 300) });
++      log('run-saved', { list: RR.R.list, title: document.getElementById('run-d-title').textContent, awards: document.getElementById('run-d-awards').innerText.replace(/\n/g, ' | '), stats: document.getElementById('run-d-stats').innerText.replace(/\n/g, ' '), efforts: document.getElementById('run-d-efforts').innerText.replace(/\n/g, ' '), splits: document.getElementById('run-d-splits').innerText.replace(/\n/g, ' ').slice(0, 300) });
+       await shot('run-detail');
++      // a photo added from the gallery (made here, as the emulator has no camera pictures)
++      { const c = document.createElement('canvas'); c.width = 800; c.height = 600; const g = c.getContext('2d'); g.fillStyle = '#c15f3c'; g.fillRect(0, 0, 800, 600); g.fillStyle = '#fff'; g.font = '80px sans-serif'; g.fillText('Maseru', 200, 320);
++        const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.9)); await RR.addPhotos([new File([blob], 'p.jpg', { type: 'image/jpeg', lastModified: RR.R.open.a.clean[Math.floor(RR.R.open.a.clean.length / 2)][0] })]); await wait(1000);
++        log('run-photo', { photos: RR.R.open.run.photos.length, list: RR.R.list[0].photos, thumbs: document.querySelectorAll('#run-d-photos img').length }); }
++      { const n = document.getElementById('run-d-name'); n.value = 'Test run through Maseru'; n.dispatchEvent(new Event('change')); await wait(500); log('run-title', { title: document.getElementById('run-d-title').textContent, saved: RR.R.list[0].title }); }
+       RR.showOnMap(); await wait(3000); log('run-map', { track: internotMap.track && internotMap.track.length, z: internotMap.view.z, chip: !!document.getElementById('run-map-chip') }); await shot('run-on-map'); RR.mapChip(false);
+-      tab('run'); await wait(500); RR.open3d(); await wait(8000); log('run-3d', { roads: RR.R.scene && RR.R.scene.roads.length, height: RR.R.scene && RR.R.scene.ex }); await shot('run-3d');
+-      const v = RR.saveVideo(); for (let i = 0; i < 60 && !RR.R.lastVideo; i++) await wait(1000); await wait(4000);
++      tab('run'); await wait(500);
++      RR.saveSettings({ video: { shape: 'tall', style: 'orange', ground: 'satellite', length: 15 } });
++      await RR.open3d(); await wait(5000); log('run-3d', { roads: RR.R.scene && RR.R.scene.roads.length, height: RR.R.scene && RR.R.scene.ex, info: RR.R.videoInfo, note: document.getElementById('run-3d-note').textContent }); await shot('run-3d');
++      await wait(3500); await shot('run-3d-photo');
++      const v = RR.saveVideo(); for (let i = 0; i < 90 && !RR.R.lastVideo; i++) await wait(1000); await wait(4000);
+       log('run-video', { video: RR.R.lastVideo || null, note: document.getElementById('run-3d-note').textContent }); await shot('run-video-share');
+-      log('run-back', 1); await wait(3000); await v.catch(() => {}); document.getElementById('run-3d-close').click(); RR.closeRun(); }
++      log('run-back', 1); await wait(3000); await v.catch(() => {}); document.getElementById('run-3d-close').click();
++      RR.shareImage(); for (let i = 0; i < 20 && !RR.R.lastImage; i++) await wait(500); await wait(3000); log('run-picture', RR.R.lastImage || null); await shot('run-picture-share');
++      log('run-back2', 1); await wait(3000);
++      RR.closeRun(); document.getElementById('run-go-records').click(); await wait(600); log('run-records', { text: document.getElementById('run-r-body').innerText.replace(/\n/g, ' | ').slice(0, 700) }); await shot('run-records');
++      RR.showPage('home'); document.getElementById('run-go-totals').click(); await wait(800); log('run-totals', { text: document.getElementById('run-t-body').innerText.replace(/\n/g, ' '), goals: document.getElementById('run-goals').innerText.replace(/\n/g, ' ') }); await shot('run-totals');
++      RR.showPage('home'); document.getElementById('run-go-settings').click(); await wait(500); log('run-settings', { bmi: document.getElementById('run-s-bmi').textContent }); await shot('run-settings');
++      RR.showPage('home'); await RR.memoryMap(); await wait(3000); log('run-memory', { routes: RR.R.memory, tracks: internotMap.tracks && internotMap.tracks.length }); await shot('run-memory-map'); RR.mapChip(false);
++      tab('run'); RR.showPage('home'); }
+     // a location pasted from WhatsApp
+     const box = document.getElementById('map-search'); box.value = 'https://maps.google.com/maps?q=-29.31678%2C27.48226&z=17&hl=en'; box.dispatchEvent(new Event('input'));
+     await wait(400); document.querySelector('#map-results li')?.click(); await wait(1500);
+diff --git a/internot-ai-v0.4/index.html b/internot-ai-v0.4/index.html
+index 041a81f..b8901a0 100644
+--- a/internot-ai-v0.4/index.html
++++ b/internot-ai-v0.4/index.html
+@@ -98,34 +98,89 @@
+   <section id="view-run" class="view" aria-label="Run and walk">
+     <div id="run-home">
+       <h2>Run and walk</h2>
+-      <div id="run-type" class="seg" role="group" aria-label="Activity"><button id="run-type-run" type="button" class="on">Run</button><button id="run-type-walk" type="button">Walk</button></div>
++      <div id="run-setup">
++        <div id="run-type" class="seg" role="group" aria-label="Activity"><button id="run-type-run" type="button" class="on">Run</button><button id="run-type-walk" type="button">Walk</button><button id="run-type-hike" type="button">Hike</button><button id="run-type-cycle" type="button">Ride</button></div>
++        <label class="run-field">Goal <select id="run-goal"><option value="none">No goal</option><option value="d3">3 km</option><option value="d5">5 km</option><option value="d10">10 km</option><option value="d21">Half marathon (21.1 km)</option><option value="d42">Marathon (42.2 km)</option><option value="t30">30 minutes</option><option value="t60">1 hour</option></select></label>
++      </div>
+       <div id="run-live-stats" class="run-stats"></div>
++      <div id="run-goalbar" class="run-goal" hidden><div class="run-goal-top"><span id="run-goalbar-text"></span></div><div class="run-goalbar"><i id="run-goalbar-fill"></i></div></div>
+       <canvas id="run-trace" class="run-trace" aria-label="Your route so far"></canvas>
+       <p id="run-gps" class="hint" role="status"></p>
+-      <div class="row wrap"><button id="run-start" type="button" class="primary run-go">Start</button><button id="run-pause" type="button" class="run-go" hidden>Pause</button><button id="run-finish" type="button" class="primary run-go" hidden>Finish</button></div>
++      <div class="row wrap"><button id="run-start" type="button" class="primary run-go">Start</button><button id="run-pause" type="button" class="run-go" hidden>Pause</button><label id="run-photo" class="button run-go" hidden>Photo<input id="run-photo-file" type="file" accept="image/*" capture="environment" hidden></label><button id="run-finish" type="button" class="primary run-go" hidden>Finish</button></div>
+       <div id="run-history-box">
++        <div id="run-goals"></div>
++        <div class="row wrap run-links"><button id="run-go-records" type="button">Records and badges</button><button id="run-go-totals" type="button">Totals</button><button id="run-go-memory" type="button">Memory map</button><button id="run-go-settings" type="button">Settings</button></div>
+         <h2>History</h2>
+-        <p id="run-week" class="hint"></p>
+-        <p id="run-empty" class="hint">No runs or walks saved yet. Press Start, then Finish when you are done.</p>
++        <p id="run-empty" class="hint">Nothing saved yet. Press Start, then Finish when you are done.</p>
+         <ul id="run-list" class="list"></ul>
+       </div>
+     </div>
+     <div id="run-detail" hidden>
+-      <button id="run-d-back" type="button">‹ All runs</button>
++      <button id="run-d-back" type="button">‹ All activities</button>
+       <h2 id="run-d-title"></h2>
++      <div id="run-d-awards" class="run-awards" hidden></div>
+       <div id="run-d-stats" class="run-stats"></div>
+       <canvas id="run-d-trace" class="run-trace" aria-label="Route"></canvas>
+-      <div class="row wrap"><button id="run-d-3d" type="button" class="primary">3D replay and video</button><button id="run-d-map" type="button">Show on map</button></div>
++      <div class="row wrap"><button id="run-d-3d" type="button" class="primary">3D replay and video</button><button id="run-d-map" type="button">Show on map</button><button id="run-d-share" type="button">Share picture</button></div>
++      <h2>Photos</h2>
++      <div id="run-d-photos" class="run-photos"></div>
++      <p id="run-d-photos-empty" class="hint">No photos. Take some with the Photo button while recording, or add them here.</p>
++      <div class="row wrap"><label class="button">Add photos<input id="run-d-addphoto" type="file" accept="image/*" multiple hidden></label></div>
++      <div id="run-d-efforts"></div>
+       <div id="run-d-profile-box"><h2>Height</h2><canvas id="run-d-profile" class="run-profile" aria-label="Height along the route"></canvas></div>
++      <div id="run-d-speed-box"><h2 id="run-d-speed-title">Speed (km/h)</h2><canvas id="run-d-speed" class="run-profile" aria-label="Speed along the route"></canvas></div>
+       <h2>Splits</h2>
+       <div id="run-d-splits" class="run-splits"></div>
++      <h2>Title and notes</h2>
++      <label class="run-field wide">Title <input id="run-d-name" type="text" maxlength="80" placeholder="For example: Morning run to Roma"></label>
++      <label class="run-field wide">Notes <textarea id="run-d-note" rows="3" maxlength="2000" placeholder="How did it feel?"></textarea></label>
+       <div class="row wrap"><button id="run-d-delete" type="button" class="danger">Delete</button></div>
+     </div>
++    <div id="run-records" hidden>
++      <button id="run-r-back" type="button">‹ Back</button>
++      <div id="run-r-body"></div>
++    </div>
++    <div id="run-totals" hidden>
++      <button id="run-t-back" type="button">‹ Back</button>
++      <h2>Totals</h2>
++      <div class="seg" role="group" aria-label="Period"><button id="run-t-week" type="button" class="on">Week</button><button id="run-t-month" type="button">Month</button><button id="run-t-year" type="button">Year</button><button id="run-t-all" type="button">All</button></div>
++      <div id="run-t-body"></div>
++      <canvas id="run-t-chart" class="run-profile run-bars" aria-label="Kilometres per period"></canvas>
++    </div>
++    <div id="run-settings" hidden>
++      <button id="run-s-back" type="button">‹ Back</button>
++      <h2>You</h2>
++      <div class="row wrap"><label class="run-field">Weight (kg) <input id="run-s-weight" type="number" min="20" max="250" step="0.5" inputmode="decimal"></label><label class="run-field">Height (cm) <input id="run-s-height" type="number" min="100" max="230" step="1" inputmode="decimal"></label></div>
++      <p id="run-s-bmi" class="hint"></p>
++      <p class="hint">Weight is used to estimate calories. It stays on this phone.</p>
++      <h2>Voice coach</h2>
++      <label class="run-check"><input id="run-s-voice" type="checkbox"> Speak my progress (works with the screen off)</label>
++      <label class="run-field">Every <select id="run-s-every"><option value="500">500 m</option><option value="1000">1 km</option><option value="2000">2 km</option><option value="5000">5 km</option><option value="t300">5 minutes</option><option value="t600">10 minutes</option></select></label>
++      <label class="run-check"><input id="run-s-auto" type="checkbox"> Auto-pause when I stand still</label>
++      <h2>Goals</h2>
++      <div class="row wrap"><label class="run-field">Each week (km) <input id="run-s-week" type="number" min="0" step="1" inputmode="decimal"></label><label class="run-field">Each month (km) <input id="run-s-month" type="number" min="0" step="1" inputmode="decimal"></label></div>
++      <h2>Privacy zone</h2>
++      <p class="hint">Hide where you start and finish (for example your home) from shared videos and pictures.</p>
++      <p id="run-s-zone" class="hint"></p>
++      <div class="row wrap"><label class="run-field">Size <select id="run-s-zone-r"><option value="200">200 m</option><option value="300">300 m</option><option value="500">500 m</option><option value="1000">1 km</option></select></label></div>
++      <div class="row wrap"><button id="run-s-zone-here" type="button">Use where I am now</button><button id="run-s-zone-last" type="button">Use the start of my last activity</button><button id="run-s-zone-clear" type="button" class="danger">Turn off</button></div>
++    </div>
+     <div id="run-3d" class="run-3d" hidden>
+       <canvas id="run-3d-canvas" aria-label="3D replay of the route"></canvas>
++      <div class="run-3d-opts">
++        <select id="run-v-shape" aria-label="Video shape"><option value="tall">Tall (stories)</option><option value="wide">Wide</option><option value="square">Square</option></select>
++        <select id="run-v-style" aria-label="Colours"><option value="orange">Orange</option><option value="blue">Blue</option><option value="green">Green</option><option value="purple">Purple</option><option value="night">Night</option></select>
++        <select id="run-v-ground" aria-label="Ground"><option value="map">Map</option><option value="satellite">Satellite</option></select>
++        <select id="run-v-length" aria-label="Length"><option value="15">15 s</option><option value="30">30 s</option><option value="60">60 s</option></select>
++      </div>
+       <div class="run-3d-bar"><button id="run-3d-play" type="button">Replay</button><button id="run-3d-video" type="button" class="primary">Save video</button><button id="run-3d-close" type="button">Close</button></div>
+       <p id="run-3d-note" class="hint" role="status"></p>
+     </div>
++    <div id="run-photo-view" class="run-3d" hidden>
++      <img id="run-photo-img" alt="Photo from the activity">
++      <p id="run-photo-cap" class="hint"></p>
++      <div class="run-3d-bar"><button id="run-photo-delete" type="button" class="danger">Delete photo</button><button id="run-photo-close" type="button">Close</button></div>
++    </div>
+   </section>
+ 
+   <!-- DOCUMENTS -->
+diff --git a/internot-ai-v0.4/maps.js b/internot-ai-v0.4/maps.js
+index aa3ef8a..eb82c18 100644
+--- a/internot-ai-v0.4/maps.js
++++ b/internot-ai-v0.4/maps.js
+@@ -412,7 +412,7 @@ function paint() {
+     ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 9; ctx.stroke(); ctx.strokeStyle = '#2f6fde'; ctx.lineWidth = 5.5; ctx.stroke();
+   }
+   if (M.track) {   // a recorded run or walk (Run tab)
+-    const t = M.track; ctx.beginPath(); t.forEach((p, i) => { const sx = p.x / u + ox, sy = p.y / u + oy; if (i) ctx.lineTo(sx, sy); else ctx.moveTo(sx, sy); });
++    ctx.beginPath(); for (const t of M.tracks) t.forEach((p, i) => { const sx = p.x / u + ox, sy = p.y / u + oy; if (i) ctx.lineTo(sx, sy); else ctx.moveTo(sx, sy); });
+     ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 8; ctx.stroke(); ctx.strokeStyle = '#d97757'; ctx.lineWidth = 4.5; ctx.stroke();
+   }
+   ctx.setTransform(M.dpr, 0, 0, M.dpr, 0, 0);   // names and markers stay upright when the map is turned
+@@ -447,7 +447,7 @@ function paint() {
+   if (M.start) dot(M.start, '#ffffff', '#1f1e1d', 7);
+   if (M.pick && !M.route) dot(M.pick, '#c15f3c', '#ffffff', 8);
+   if (M.dest) dot(M.dest, '#1f1e1d', '#ffffff', 9);
+-  if (M.track) { dot(M.track[0], '#3f9b4f', '#ffffff', 7); dot(M.track[M.track.length - 1], '#1f1e1d', '#ffffff', 7); }
++  if (M.track && M.tracks.length === 1) { dot(M.track[0], '#3f9b4f', '#ffffff', 7); dot(M.track[M.track.length - 1], '#1f1e1d', '#ffffff', 7); }
+   const nb = $('map-north'); if (nb) { nb.hidden = !rot; nb.firstChild && (nb.firstChild.style.transform = `rotate(${rot}rad)`); }
+   if (M.gps) {
+     const [sx, sy] = toS(M.gps.x, M.gps.y); const rad = Math.min(200, (M.gps.acc || 0) / mPerUnit(M.gps.y) / u);
+@@ -787,10 +787,12 @@ export async function initMaps(root) {
+   renderMapInfo();
+ }
+ // Run tab: show a recorded run on the map (null hides it), and the roads around it for the 3D replay.
+-function setTrack(pts) {
+-  M.track = pts && pts.length > 1 ? pts.map(([lat, lon]) => ({ x: lonToX(lon), y: latToY(lat) })) : null;
++function setTrack(pts) { setTracks(pts && pts.length > 1 ? [pts] : null); }
++function setTracks(list) {   // several routes at once (the Run tab's memory map)
++  M.tracks = (list || []).filter((t) => t && t.length > 1).map((t) => t.map(([lat, lon]) => ({ x: lonToX(lon), y: latToY(lat) })));
++  M.track = M.tracks.length ? M.tracks[0] : null;
+   if (M.track && M.w) {
+-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const p of M.track) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
++    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const t of M.tracks) for (const p of t) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
+     const span = Math.max((x1 - x0) / (M.w * 0.75), (y1 - y0) / (M.h * 0.7), 1);
+     M.view.cx = (x0 + x1) / 2; M.view.cy = (y0 + y1) / 2; M.view.rot = 0; M.view.z = Math.max(3, Math.min(18, Math.log2(TWO32 / (256 * span)))); M.needFit = false;
+   }
+@@ -807,6 +809,6 @@ function roadsNear(lat0, lon0, lat1, lon1, max = 4000) {
+   });
+   return out;
+ }
+-M.api = { setTrack, roadsNear, parseLocation, setSat, SAT, makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint, switchBuiltIn, builtIns: () => BUILT_INS, current: () => M.builtIn, addMaps, removeMap: (file) => { BUILT_INS = BUILT_INS.filter((b) => b.file !== file); renderMapInfo(); } };
++M.api = { setTrack, setTracks, speak, satTile, satLocalBox: () => SAT.local, roadsNear, parseLocation, setSat, SAT, makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint, switchBuiltIn, builtIns: () => BUILT_INS, current: () => M.builtIn, addMaps, removeMap: (file) => { BUILT_INS = BUILT_INS.filter((b) => b.file !== file); renderMapInfo(); } };
+ M.api.speakTest = async (text) => { if (!TTS) return { native: false, web: 'speechSynthesis' in window }; const l = await TTS.getSupportedLanguages().catch((e) => ({ error: String(e) })); const said = await Promise.race([TTS.speak({ text, lang: 'en-US' }).then(() => 'spoken', (e) => 'failed: ' + (e?.message || e)), new Promise((r) => setTimeout(() => r('timeout'), 9000))]); return { native: true, languages: l.languages ? l.languages.length : l, said }; };
+ export const mapShown = () => resize();
+diff --git a/internot-ai-v0.4/online.js b/internot-ai-v0.4/online.js
+index 2db7736..d2dc8e0 100644
+--- a/internot-ai-v0.4/online.js
++++ b/internot-ai-v0.4/online.js
+@@ -5,7 +5,7 @@
+ //  • Unlock codes for paid packs.
+ // Everything else in the app works the same with No, or with no internet at all.
+ export const SERVER = 'https://internot-server.onrender.com';
+-export const APP_VERSION = '0.10.0';
++export const APP_VERSION = '0.11.0';
+ const $ = (id) => document.getElementById(id);
+ const NATIVE = !!window.Capacitor;
+ const ls = { get(k, d = null) { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch { return d; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
+diff --git a/internot-ai-v0.4/run-extra.js b/internot-ai-v0.4/run-extra.js
+new file mode 100644
+index 0000000..9fdc906
+--- /dev/null
++++ b/internot-ai-v0.4/run-extra.js
+@@ -0,0 +1,166 @@
++// Run tab: personal records, badges and challenges, goals, and weekly/monthly/yearly totals.
++// Everything is worked out from the activities saved on this phone.
++import { R, settings, typeName, fmtKm, fmtClock, paceOrSpeed, paceUnit, stat, EFFORTS, TYPES } from './run.js';
++
++const $ = (id) => document.getElementById(id);
++const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
++const DAY = 864e5;
++const dayKey = (t) => { const d = new Date(t); return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate(); };
++export const weekStart = (t) => { const d = new Date(t); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d.getTime(); };   // Monday
++export const monthStart = (t) => { const d = new Date(t); return new Date(d.getFullYear(), d.getMonth(), 1).getTime(); };
++const yearStart = (t) => new Date(new Date(t).getFullYear(), 0, 1).getTime();
++
++/* ---------- personal records ---------- */
++export function bestsOf(list, type) {
++  const b = { longest: null, longestTime: null, climb: null, pace: null, speed: null, efforts: {} };
++  for (const r of list) {
++    if (r.type !== type) continue;
++    if (!b.longest || r.dist > b.longest.v) b.longest = { v: r.dist, id: r.id };
++    if (!b.longestTime || r.moving > b.longestTime.v) b.longestTime = { v: r.moving, id: r.id };
++    if (r.gain >= 20 && (!b.climb || r.gain > b.climb.v)) b.climb = { v: r.gain, id: r.id };
++    if (r.dist >= 1000 && r.pace && (!b.pace || r.pace < b.pace.v)) b.pace = { v: r.pace, id: r.id };
++    if (r.maxSpeed && (!b.speed || r.maxSpeed > b.speed.v)) b.speed = { v: r.maxSpeed, id: r.id };
++    for (const [D, t] of Object.entries(r.efforts || {})) if (!b.efforts[D] || t < b.efforts[D].v) b.efforts[D] = { v: t, id: r.id };
++  }
++  return b;
++}
++// What a new activity beats, compared with the earlier ones of the same type (none on the very first one).
++export function newRecords(before, sum) {
++  const old = before.filter((r) => r.type === sum.type); if (!old.length) return [];
++  const b = bestsOf(old, sum.type), out = [];
++  for (const [D, label] of EFFORTS.slice().reverse()) { const t = sum.efforts?.[D]; if (t && (!b.efforts[D] || t < b.efforts[D].v)) out.push({ key: 'e' + D, label: 'Fastest ' + label, value: fmtClock(t) }); }
++  if (b.longest && sum.dist > b.longest.v) out.push({ key: 'longest', label: `Longest ${typeName(sum.type).toLowerCase()}`, value: fmtKm(sum.dist) + ' km' });
++  if (sum.gain >= 20 && (!b.climb || sum.gain > b.climb.v)) out.push({ key: 'climb', label: 'Most climbing', value: sum.gain + ' m' });
++  if (sum.dist >= 1000 && sum.pace && b.pace && sum.pace < b.pace.v) out.push({ key: 'pace', label: sum.type === 'cycle' ? 'Fastest average speed' : 'Fastest average pace', value: paceOrSpeed(sum.type, sum.pace) + ' ' + paceUnit(sum.type) });
++  return out;
++}
++
++/* ---------- badges ---------- */
++// Each test walks the activities from oldest to newest and returns the time the badge was earned (or null) and progress.
++const chrono = (list) => list.slice().sort((a, b) => a.start - b.start);
++const single = (min, type) => (list) => { const hit = chrono(list).find((r) => r.dist >= min && (!type || r.type === type)); const best = Math.max(0, ...list.filter((r) => !type || r.type === type).map((r) => r.dist)); return { at: hit ? hit.start : null, have: best, need: min, unit: 'km' }; };
++const total = (key, min, unit) => (list) => { let s = 0, at = null; for (const r of chrono(list)) { s += r[key] || 0; if (at == null && s >= min) at = r.start; } return { at, have: s, need: min, unit }; };
++const count = (min) => (list) => { const c = chrono(list); return { at: c.length >= min ? c[min - 1].start : null, have: c.length, need: min, unit: '' }; };
++function streak(list) {   // 7 days in a row with an activity
++  const days = [...new Set(chrono(list).map((r) => { const d = new Date(r.start); d.setHours(12, 0, 0, 0); return d.getTime(); }))].sort((a, b) => a - b);
++  let run = 0, best = 0, at = null;
++  for (let i = 0; i < days.length; i++) { run = i && Math.round((days[i] - days[i - 1]) / DAY) === 1 ? run + 1 : 1; best = Math.max(best, run); if (at == null && run >= 7) at = days[i]; }
++  return { at, have: best, need: 7, unit: 'days' };
++}
++function weeks(list) {   // active in 4 weeks in a row
++  const ws = [...new Set(chrono(list).map((r) => weekStart(r.start)))].sort((a, b) => a - b);
++  let run = 0, best = 0, at = null;
++  for (let i = 0; i < ws.length; i++) { run = i && Math.round((ws[i] - ws[i - 1]) / (7 * DAY)) === 1 ? run + 1 : 1; best = Math.max(best, run); if (at == null && run >= 4) at = ws[i]; }
++  return { at, have: best, need: 4, unit: 'weeks' };
++}
++function month50(list) {   // 50 km in one calendar month
++  const m = new Map(); let at = null, best = 0;
++  for (const r of chrono(list)) { const k = monthStart(r.start), s = (m.get(k) || 0) + r.dist; m.set(k, s); best = Math.max(best, s); if (at == null && s >= 50000) at = r.start; }
++  return { at, have: best, need: 50000, unit: 'km' };
++}
++const early = (list) => { const hit = chrono(list).find((r) => new Date(r.start).getHours() < 6); return { at: hit ? hit.start : null, have: hit ? 1 : 0, need: 1, unit: '' }; };
++const photo = (list) => { const hit = chrono(list).find((r) => r.photos > 0); return { at: hit ? hit.start : null, have: hit ? 1 : 0, need: 1, unit: '' }; };
++export const BADGES = [
++  { id: 'first', icon: '👟', name: 'First steps', desc: 'Save your first activity', test: count(1) },
++  { id: 'k5', icon: '5️⃣', name: '5 km', desc: 'Cover 5 km in one activity', test: single(5000) },
++  { id: 'k10', icon: '🔟', name: '10 km', desc: 'Cover 10 km in one activity', test: single(10000) },
++  { id: 'half', icon: '🥈', name: 'Half marathon', desc: 'Run 21.1 km in one run', test: single(21097.5, 'run') },
++  { id: 'full', icon: '🥇', name: 'Marathon', desc: 'Run 42.2 km in one run', test: single(42195, 'run') },
++  { id: 'ride50', icon: '🚲', name: 'Long ride', desc: 'Ride 50 km in one ride', test: single(50000, 'cycle') },
++  { id: 'n10', icon: '🔁', name: 'Regular', desc: 'Save 10 activities', test: count(10) },
++  { id: 'n50', icon: '💪', name: 'Committed', desc: 'Save 50 activities', test: count(50) },
++  { id: 't100', icon: '💯', name: '100 km', desc: 'Cover 100 km in total', test: total('dist', 100000, 'km') },
++  { id: 't500', icon: '🛣️', name: '500 km', desc: 'Cover 500 km in total', test: total('dist', 500000, 'km') },
++  { id: 't1000', icon: '🌍', name: '1,000 km', desc: 'Cover 1,000 km in total', test: total('dist', 1000000, 'km') },
++  { id: 'c1000', icon: '⛰️', name: 'Climber', desc: 'Climb 1,000 m in total', test: total('gain', 1000, 'm') },
++  { id: 'c3482', icon: '🏔️', name: 'Thabana Ntlenyana', desc: 'Climb 3,482 m in total, the height of Lesotho\'s highest mountain', test: total('gain', 3482, 'm') },
++  { id: 'streak7', icon: '🔥', name: 'Seven days', desc: 'Be active 7 days in a row', test: streak },
++  { id: 'weeks4', icon: '📅', name: 'Four weeks', desc: 'Be active in 4 weeks in a row', test: weeks },
++  { id: 'month50', icon: '🗓️', name: '50 km month', desc: 'Cover 50 km in one calendar month', test: month50 },
++  { id: 'early', icon: '🌅', name: 'Early bird', desc: 'Start an activity before 6 in the morning', test: early },
++  { id: 'photo', icon: '📷', name: 'Photographer', desc: 'Take a photo during an activity', test: photo },
++];
++export function earnedBadges(list) { const out = []; for (const b of BADGES) { const r = b.test(list); if (r.at != null) out.push({ ...b, at: r.at }); } return out; }
++
++/* ---------- goals (home screen) ---------- */
++const sumSince = (from, to = Infinity) => R.list.filter((r) => r.start >= from && r.start < to);
++function bar(label, have, need) {
++  const p = need ? Math.min(1, have / need) : 0;
++  return `<div class="run-goal"><div class="run-goal-top"><span>${label}</span><b>${fmtKm(have)}${need ? ' of ' + (need / 1000).toFixed(need % 1000 ? 1 : 0) : ''} km</b></div>${need ? `<div class="run-goalbar"><i style="width:${(p * 100).toFixed(1)}%"></i></div>` : ''}</div>`;
++}
++export function renderGoals() {
++  const box = $('run-goals'); if (!box) return; const s = settings(), now = Date.now();
++  const w = sumSince(weekStart(now)), m = sumSince(monthStart(now));
++  const wd = w.reduce((a, r) => a + r.dist, 0), md = m.reduce((a, r) => a + r.dist, 0);
++  box.innerHTML = bar('This week', wd, (+s.weekGoal || 0) * 1000) + bar('This month', md, (+s.monthGoal || 0) * 1000) +
++    (!s.weekGoal && !s.monthGoal ? '<p class="hint">Set a weekly or monthly goal under Settings.</p>' : '');
++}
++
++/* ---------- records and badges screen ---------- */
++export function renderRecords() {
++  const box = $('run-r-body'); if (!box) return; let html = '';
++  const now = Date.now(), monthKm = sumSince(monthStart(now)).reduce((a, r) => a + r.dist, 0), weekDays = new Set(sumSince(weekStart(now)).map((r) => dayKey(r.start))).size;
++  const ch = (name, have, need, txt) => `<div class="run-goal"><div class="run-goal-top"><span>${name}</span><b>${txt}</b></div><div class="run-goalbar"><i style="width:${Math.min(100, (have / need) * 100).toFixed(1)}%"></i></div></div>`;
++  html += '<h2>Challenges</h2>' + ch('This month: cover 50 km', monthKm, 50000, `${fmtKm(monthKm)} of 50 km`) + ch('This week: be active on 3 days', weekDays, 3, `${weekDays} of 3 days`);
++  for (const type of Object.keys(TYPES)) {
++    const b = bestsOf(R.list, type); if (!b.longest) continue;
++    const link = (x, text) => `<button type="button" class="linklike" data-open="${x.id}">${text}</button>`;
++    let rows = '';
++    for (const [D, label] of EFFORTS) if (b.efforts[D]) rows += `<tr><td>Fastest ${label}</td><td>${link(b.efforts[D], fmtClock(b.efforts[D].v))}</td></tr>`;
++    rows += `<tr><td>Longest</td><td>${link(b.longest, fmtKm(b.longest.v) + ' km')}</td></tr><tr><td>Longest time</td><td>${link(b.longestTime, fmtClock(b.longestTime.v))}</td></tr>`;
++    if (b.pace) rows += `<tr><td>${type === 'cycle' ? 'Fastest average speed' : 'Fastest average pace'} (1 km or more)</td><td>${link(b.pace, paceOrSpeed(type, b.pace.v) + ' ' + paceUnit(type))}</td></tr>`;
++    if (b.climb) rows += `<tr><td>Most climbing</td><td>${link(b.climb, b.climb.v + ' m')}</td></tr>`;
++    if (b.speed) rows += `<tr><td>Top speed</td><td>${link(b.speed, b.speed.v.toFixed(1) + ' km/h')}</td></tr>`;
++    // race times you could reach, from your best 5 km or 10 km (Riegel's formula: time grows with distance to the power 1.06)
++    let pred = '';
++    if (type === 'run') { const base = b.efforts[10000] ? [10000, b.efforts[10000].v] : b.efforts[5000] ? [5000, b.efforts[5000].v] : null;
++      if (base) pred = '<p class="hint">Race predictions from your best ' + (base[0] / 1000) + ' km: ' + [[5000, '5 km'], [10000, '10 km'], [21097.5, 'half marathon'], [42195, 'marathon']].filter(([d]) => d !== base[0]).map(([d, l]) => `${l} ${fmtClock(base[1] * (d / base[0]) ** 1.06)}`).join(' · ') + '. A guide only.</p>'; }
++    html += `<h2>${typeName(type)} records</h2><div class="run-splits"><table><tbody>${rows}</tbody></table></div>${pred}`;
++  }
++  const got = new Map(earnedBadges(R.list).map((b) => [b.id, b.at]));
++  html += `<h2>Badges · ${got.size} of ${BADGES.length}</h2><div class="run-badges">` + BADGES.map((b) => {
++    const at = got.get(b.id), t = b.test(R.list), num = (v) => Math.round(v).toLocaleString('en-US'), km1 = (m) => (m % 1000 ? (m / 1000).toFixed(1) : num(m / 1000));
++    const prog = at ? '' : t.need > 1 ? ` · ${t.unit === 'km' ? (t.have / 1000).toFixed(1) + ' of ' + km1(t.need) + ' km' : num(t.have) + ' of ' + num(t.need) + (t.unit ? ' ' + t.unit : '')}` : '';
++    return `<div class="run-badge${at ? ' got' : ''}"><span class="run-badge-i">${b.icon}</span><b>${esc(b.name)}</b><small>${esc(b.desc)}${at ? ' · ' + new Date(at).toLocaleDateString() : prog}</small></div>`;
++  }).join('') + '</div>';
++  if (!R.list.length) html += '<p class="hint">Records appear after your first saved activity.</p>';
++  box.innerHTML = html;
++  for (const el of box.querySelectorAll('[data-open]')) el.onclick = () => window.internotRun.openRun(el.dataset.open);
++}
++
++/* ---------- totals screen ---------- */
++let period = 'week';
++export function renderTotals() {
++  const box = $('run-t-body'); if (!box) return; const now = Date.now();
++  for (const p of ['week', 'month', 'year', 'all']) $('run-t-' + p)?.classList.toggle('on', p === period);
++  const from = period === 'week' ? weekStart(now) : period === 'month' ? monthStart(now) : period === 'year' ? yearStart(now) : 0;
++  const list = sumSince(from), add = (k) => list.reduce((a, r) => a + (r[k] || 0), 0);
++  const byType = Object.keys(TYPES).map((t) => [t, list.filter((r) => r.type === t)]).filter(([, l]) => l.length);
++  box.innerHTML = '<div class="run-stats">' + stat('kilometres', fmtKm(add('dist'))) + stat('moving time', fmtClock(add('moving'))) + stat('activities', list.length) + stat('climbed', add('gain'), 'm') + stat('calories (about)', add('kcal'), 'kcal') + '</div>' +
++    (byType.length ? '<p class="hint">' + byType.map(([t, l]) => `${typeName(t)}: ${l.length} · ${fmtKm(l.reduce((a, r) => a + r.dist, 0))} km`).join(' · ') + '</p>' : '');
++  // bars: the last 12 weeks, the last 12 months, or per year
++  const buckets = [];
++  if (period === 'week') for (let i = 11; i >= 0; i--) { const s = weekStart(now) - i * 7 * DAY; buckets.push([s, s + 7 * DAY, new Date(s).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })]); }
++  else if (period === 'month' || period === 'year') for (let i = 11; i >= 0; i--) { const d = new Date(now); const s = new Date(d.getFullYear(), d.getMonth() - i, 1).getTime(), e = new Date(d.getFullYear(), d.getMonth() - i + 1, 1).getTime(); buckets.push([s, e, new Date(s).toLocaleDateString(undefined, { month: 'short' })]); }
++  else { const y0 = R.list.length ? new Date(Math.min(...R.list.map((r) => r.start))).getFullYear() : new Date(now).getFullYear(), y1 = new Date(now).getFullYear(); for (let y = Math.max(y0, y1 - 9); y <= y1; y++) buckets.push([new Date(y, 0, 1).getTime(), new Date(y + 1, 0, 1).getTime(), String(y)]); }
++  const vals = buckets.map(([s, e]) => R.list.filter((r) => r.start >= s && r.start < e).reduce((a, r) => a + r.dist, 0) / 1000);
++  R.totalsBars = vals;
++  requestAnimationFrame(() => drawBars($('run-t-chart'), vals, buckets.map((b) => b[2])));
++}
++function drawBars(c, vals, labels) {
++  if (!c || !c.clientWidth) return; const w = c.clientWidth, h = c.clientHeight, dpr = window.devicePixelRatio || 1;
++  c.width = w * dpr; c.height = h * dpr; const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
++  const max = Math.max(1, ...vals), B = 30, T = 18, bw = (w - 16) / vals.length;
++  g.font = '10px system-ui, sans-serif'; g.textAlign = 'center';
++  vals.forEach((v, i) => {
++    const x = 8 + i * bw, bh = (v / max) * (h - B - T);
++    g.fillStyle = i === vals.length - 1 ? '#c15f3c' : '#d97757aa'; g.fillRect(x + bw * 0.15, h - B - bh, bw * 0.7, Math.max(v > 0 ? 2 : 0, bh));
++    g.fillStyle = '#6b6860'; if (vals.length <= 12 || i % 2 === 0) g.fillText(labels[i], x + bw / 2, h - B + 14);
++    if (v > 0) { g.fillStyle = '#1f1e1d'; g.fillText(v >= 100 ? Math.round(v) : v.toFixed(1), x + bw / 2, h - B - bh - 4); }
++  });
++  g.textAlign = 'left'; g.fillStyle = '#6b6860'; g.fillText('km', 8, 11);
++}
++export function initExtra() {
++  for (const p of ['week', 'month', 'year', 'all']) { const b = $('run-t-' + p); if (b) b.onclick = () => { period = p; renderTotals(); }; }
++}
++
+diff --git a/internot-ai-v0.4/run-video.js b/internot-ai-v0.4/run-video.js
+new file mode 100644
+index 0000000..8e03131
+--- /dev/null
++++ b/internot-ai-v0.4/run-video.js
+@@ -0,0 +1,240 @@
++// Run tab: 3D replay of an activity and the video made from it (all on the phone, no internet).
++// The route is drawn over the roads of the offline map, or over the offline satellite pictures; photos taken on the way
++// pop up where they were taken; it opens with a title card and ends with the highlights.
++import { R, settings, saveSettings, typeName, fmtKm, fmtClock, fmtPace, paceOrSpeed, paceUnit, privatePts, photoURL, shareFile, kcal } from './run.js';
++
++const $ = (id) => document.getElementById(id);
++const RAD = Math.PI / 180;
++export const THEMES = {
++  orange: { route: '#d97757', wall: '217,119,87', sky: ['#f6f3ea', '#e4ddcc'], ground: 'rgba(232,226,210,.95)', grid: 'rgba(120,110,90,.18)', road: 'rgba(120,110,92,.7)', major: 'rgba(217,119,87,.75)', hud: 'rgba(31,30,29,.84)', ink: '#1f1e1d', me: '#2f6fde' },
++  blue: { route: '#2f6fde', wall: '47,111,222', sky: ['#eef4fb', '#d6e2f0'], ground: 'rgba(225,233,242,.95)', grid: 'rgba(60,90,130,.16)', road: 'rgba(80,100,130,.6)', major: 'rgba(47,111,222,.6)', hud: 'rgba(16,32,58,.86)', ink: '#10203a', me: '#d97757' },
++  green: { route: '#2f8a46', wall: '47,138,70', sky: ['#eef6ec', '#d8e8d2'], ground: 'rgba(222,236,216,.95)', grid: 'rgba(60,110,60,.16)', road: 'rgba(80,110,80,.6)', major: 'rgba(47,138,70,.6)', hud: 'rgba(20,48,26,.86)', ink: '#14301a', me: '#d97757' },
++  purple: { route: '#8a4fd1', wall: '138,79,209', sky: ['#f3eefb', '#e1d6f0'], ground: 'rgba(234,227,244,.95)', grid: 'rgba(100,70,140,.16)', road: 'rgba(110,90,140,.6)', major: 'rgba(138,79,209,.6)', hud: 'rgba(40,20,64,.86)', ink: '#281440', me: '#2f8a46' },
++  night: { route: '#ffb547', wall: '255,181,71', sky: ['#10131c', '#1d2333'], ground: 'rgba(32,38,52,.96)', grid: 'rgba(255,255,255,.08)', road: 'rgba(200,210,230,.45)', major: 'rgba(255,181,71,.55)', hud: 'rgba(0,0,0,.62)', ink: '#f3f1ea', me: '#7fd1ff' },
++};
++export const SHAPES = { tall: [720, 1280], wide: [1280, 720], square: [960, 960] };
++const INTRO = 2200, OUTRO = 3600, PHOTO = 2400;
++
++/* ---------- the scene: metres east/north of the middle, height above the lowest point ---------- */
++async function scene(run, a) {
++  const keep = []; const shared = new Set(privatePts(a.clean)); a.clean.forEach((p, i) => { if (shared.has(p)) keep.push(i); });
++  if (keep.length < 2) return null;
++  const Pp = keep.map((i) => a.clean[i]); let la = 0, lo = 0; for (const p of Pp) { la += p[1]; lo += p[2]; } la /= Pp.length; lo /= Pp.length;
++  const k = 111320 * Math.cos(la * RAD), M = 110540;
++  const xy = Pp.map((p) => [(p[2] - lo) * k, (p[1] - la) * M]);
++  let ext = 30; for (const [x, y] of xy) ext = Math.max(ext, Math.abs(x), Math.abs(y));
++  const alt = a.alt ? keep.map((i) => a.alt[i]) : null, lowA = alt ? Math.min(...alt.filter((v) => v != null)) : 0, highA = alt ? Math.max(...alt.filter((v) => v != null)) : 0;
++  const relief = alt ? Math.max(1, highA - lowA) : 0, ex = relief ? Math.min(8, Math.max(1.5, (ext * 0.35) / relief)) : 1;
++  const z = keep.map((i, j) => (alt && alt[j] != null ? (alt[j] - lowA) * ex : 0));
++  const G = ext * 1.25;
++  let roads = [];
++  try {
++    const dl = G / M, dn = G / k;
++    roads = (window.internotMap?.api?.roadsNear?.(la - dl, lo - dn, la + dl, lo + dn, 3000) || []).map((r) => ({ cls: r.cls, pts: r.pts.map(([y, x]) => [(x - lo) * k, (y - la) * M]) }));
++  } catch {}
++  // photos: placed at the nearest shared point of the route (a photo inside the privacy zone is left out)
++  const photos = [];
++  for (const ph of (run.photos || []).slice(0, 8)) {
++    if (ph.lat == null) continue; let best = -1, bd = Infinity;
++    Pp.forEach((p, j) => { const d = (p[1] - ph.lat) ** 2 + ((p[2] - ph.lon) * Math.cos(la * RAD)) ** 2; if (d < bd) { bd = d; best = j; } });
++    if (best < 0 || Math.sqrt(bd) * 111320 > 300) continue;
++    try { const u = await photoURL(ph.name); if (!u) continue; const img = await createImageBitmap(await (await fetch(u)).blob()); photos.push({ j: best, img, t: ph.t }); } catch {}
++  }
++  photos.sort((p, q) => p.j - q.j);
++  return { run, a, keep, xy, z, ext, ex, G, la, lo, k, M, roads, photos, cum: keep.map((i) => a.cum[i]), tim: keep.map((i) => a.tim[i]), alt, type: run.type, start: run.start, records: run.records || [] };
++}
++
++/* ---------- satellite pictures under the route (from the offline pictures; nothing is downloaded when offline) ---------- */
++const lon2x = (lon, z) => ((lon + 180) / 360) * 2 ** z;
++const lat2y = (lat, z) => ((1 - Math.log(Math.tan(lat * RAD) + 1 / Math.cos(lat * RAD)) / Math.PI) / 2) * 2 ** z;
++const x2lon = (x, z) => (x / 2 ** z) * 360 - 180;
++const y2lat = (y, z) => Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / 2 ** z)));
++async function satGround(S) {
++  const api = window.internotMap?.api; if (!api?.satTile) return null;
++  const { la, lo, k, M, G } = S, lat0 = la - G / M, lat1 = la + G / M, lon0 = lo - G / k, lon1 = lo + G / k;
++  let z = Math.round(Math.log2((40075016.686 * Math.cos(la * RAD) * 4) / (2 * G))); z = Math.max(3, Math.min(16, z));
++  const box = api.satLocalBox?.(), inside = box && lon0 >= box.box[0] && lon1 <= box.box[2] && lat0 >= box.box[1] && lat1 <= box.box[3];
++  const maxZ = inside ? box.max : navigator.onLine ? 14 : box ? box.world : 4; z = Math.min(z, maxZ);
++  let tx0, tx1, ty0, ty1;
++  for (;;) { tx0 = Math.floor(lon2x(lon0, z)); tx1 = Math.floor(lon2x(lon1, z)); ty0 = Math.floor(lat2y(lat1, z)); ty1 = Math.floor(lat2y(lat0, z)); if ((tx1 - tx0 + 1) * (ty1 - ty0 + 1) <= 36 || z <= 3) break; z--; }
++  const tiles = []; for (let x = tx0; x <= tx1; x++) for (let y = ty0; y <= ty1; y++) tiles.push([x, y, api.satTile(z, x, y)]);
++  for (let i = 0; i < 40 && tiles.some(([, , t]) => t.state === 'loading'); i++) await new Promise((r) => setTimeout(r, 200));
++  const TS = 1024, tex = document.createElement('canvas'); tex.width = tex.height = TS; const g = tex.getContext('2d'); let n = 0;
++  g.fillStyle = '#7d8a6a'; g.fillRect(0, 0, TS, TS);
++  for (const [x, y, t] of tiles) {
++    if (!t.img) continue; n++;
++    const a0 = x2lon(x, z), a1 = x2lon(x + 1, z), b1 = y2lat(y, z) / RAD, b0 = y2lat(y + 1, z) / RAD;
++    const u0 = ((a0 - lon0) / (lon1 - lon0)) * TS, u1 = ((a1 - lon0) / (lon1 - lon0)) * TS, v0 = ((lat1 - b1) / (lat1 - lat0)) * TS, v1 = ((lat1 - b0) / (lat1 - lat0)) * TS;
++    try { g.drawImage(t.img, u0, v0, u1 - u0 + 0.5, v1 - v0 + 0.5); } catch { n--; }
++  }
++  return n ? { tex, zoom: z, tiles: n, of: tiles.length } : null;
++}
++function texTri(g, img, s, t) {   // draws one triangle of the picture, stretched to the screen triangle s
++  const [[x0, y0], [x1, y1], [x2, y2]] = s, [[u0, v0], [u1, v1], [u2, v2]] = t;
++  const det = u0 * (v1 - v2) + u1 * (v2 - v0) + u2 * (v0 - v1); if (!det) return;
++  const cx = (x0 + x1 + x2) / 3, cy = (y0 + y1 + y2) / 3, grow = (x, y) => { const dx = x - cx, dy = y - cy, l = Math.hypot(dx, dy) || 1; return [x + (dx / l) * 0.7, y + (dy / l) * 0.7]; };
++  g.save(); g.beginPath(); const a = grow(x0, y0), b = grow(x1, y1), c = grow(x2, y2); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.lineTo(c[0], c[1]); g.closePath(); g.clip();
++  const m11 = (x0 * (v1 - v2) + x1 * (v2 - v0) + x2 * (v0 - v1)) / det, m21 = (u0 * (x1 - x2) + u1 * (x2 - x0) + u2 * (x0 - x1)) / det;
++  const dx = (u0 * (v1 * x2 - v2 * x1) + u1 * (v2 * x0 - v0 * x2) + u2 * (v0 * x1 - v1 * x0)) / det;
++  const m12 = (y0 * (v1 - v2) + y1 * (v2 - v0) + y2 * (v0 - v1)) / det, m22 = (u0 * (y1 - y2) + u1 * (y2 - y0) + u2 * (y0 - y1)) / det;
++  const dy = (u0 * (v1 * y2 - v2 * y1) + u1 * (v2 * y0 - v0 * y2) + u2 * (v0 * y1 - v1 * y0)) / det;
++  g.transform(m11, m12, m21, m22, dx, dy); g.drawImage(img, 0, 0); g.restore();
++}
++
++/* ---------- one frame ---------- */
++function roundRect(g, x, y, w, h, r) { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); }
++function render(g, w, h, S, frac, angle, th, sat) {
++  const { xy, z, ext, roads, G } = S, n = xy.length, U = Math.min(w, h) / 400;
++  const tilt = 0.62, cosA = Math.cos(angle), sinA = Math.sin(angle), cosT = Math.cos(tilt), sinT = Math.sin(tilt);
++  const dist = ext * 2.9, f = Math.min(w, h) * 1.25, cyy = h * (w > h ? 0.52 : 0.5);
++  const proj = (x, y, zz) => {   // the camera circles the route, looking down at it
++    const rx = x * cosA - y * sinA, ry = x * sinA + y * cosA;
++    const depth = ry * cosT - zz * sinT + dist, up = ry * sinT + zz * cosT;
++    const s = f / Math.max(depth, ext * 0.2); return [w / 2 + rx * s, cyy - up * s];
++  };
++  const sky = g.createLinearGradient(0, 0, 0, h); sky.addColorStop(0, th.sky[0]); sky.addColorStop(1, th.sky[1]); g.fillStyle = sky; g.fillRect(0, 0, w, h);
++  if (sat) {   // satellite ground, cut into small triangles so it follows the perspective
++    const N = 8, TS = sat.tex.width;
++    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
++      const xa = -G + (2 * G * i) / N, xb = -G + (2 * G * (i + 1)) / N, ya = -G + (2 * G * j) / N, yb = -G + (2 * G * (j + 1)) / N;
++      const T = (x, y) => [((x + G) / (2 * G)) * TS, ((G - y) / (2 * G)) * TS];
++      const p00 = proj(xa, ya, 0), p10 = proj(xb, ya, 0), p01 = proj(xa, yb, 0), p11 = proj(xb, yb, 0);
++      texTri(g, sat.tex, [p00, p10, p11], [T(xa, ya), T(xb, ya), T(xb, yb)]); texTri(g, sat.tex, [p00, p11, p01], [T(xa, ya), T(xb, yb), T(xa, yb)]);
++    }
++  } else {
++    const corners = [[-G, -G], [G, -G], [G, G], [-G, G]].map(([x, y]) => proj(x, y, 0));
++    g.beginPath(); corners.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.closePath(); g.fillStyle = th.ground; g.fill();
++    g.lineWidth = 1; g.strokeStyle = th.grid;
++    for (let i = -4; i <= 4; i++) { const t = (G * i) / 4; let p = proj(-G, t, 0), q = proj(G, t, 0); g.beginPath(); g.moveTo(p[0], p[1]); g.lineTo(q[0], q[1]); g.stroke(); p = proj(t, -G, 0); q = proj(t, G, 0); g.beginPath(); g.moveTo(p[0], p[1]); g.lineTo(q[0], q[1]); g.stroke(); }
++    g.lineJoin = g.lineCap = 'round';
++    for (const r of roads) {
++      g.beginPath(); let on = false;
++      for (const [x, y] of r.pts) { if (Math.abs(x) > G || Math.abs(y) > G) { on = false; continue; } const [sx, sy] = proj(x, y, 0); if (on) g.lineTo(sx, sy); else g.moveTo(sx, sy); on = true; }
++      g.strokeStyle = r.cls <= 3 ? th.major : th.road; g.lineWidth = (r.cls <= 3 ? 2.6 : 1.6) * U * 0.9; g.stroke();
++    }
++  }
++  const Pt = xy.map(([x, y], i) => proj(x, y, z[i])), F = xy.map(([x, y]) => proj(x, y, 0)), cut = Math.max(1, Math.min(n - 1, Math.round(frac * (n - 1))));
++  g.lineJoin = g.lineCap = 'round';
++  g.beginPath(); F.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.strokeStyle = 'rgba(40,30,20,.25)'; g.lineWidth = 3 * U; g.stroke();
++  for (let i = 1; i < n; i++) {   // a see-through wall from the ground up to the route shows the height
++    g.beginPath(); g.moveTo(F[i - 1][0], F[i - 1][1]); g.lineTo(Pt[i - 1][0], Pt[i - 1][1]); g.lineTo(Pt[i][0], Pt[i][1]); g.lineTo(F[i][0], F[i][1]); g.closePath();
++    g.fillStyle = i <= cut ? `rgba(${th.wall},.3)` : 'rgba(160,150,130,.12)'; g.fill();
++  }
++  g.beginPath(); Pt.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.strokeStyle = 'rgba(255,255,255,.55)'; g.lineWidth = 3 * U; g.stroke();
++  g.beginPath(); for (let i = 0; i <= cut; i++) (i ? g.lineTo(Pt[i][0], Pt[i][1]) : g.moveTo(Pt[i][0], Pt[i][1])); g.strokeStyle = '#ffffff'; g.lineWidth = 7 * U; g.stroke(); g.strokeStyle = th.route; g.lineWidth = 4.5 * U; g.stroke();
++  const pin = (p, col, r) => { g.beginPath(); g.arc(p[0], p[1], r * U, 0, 7); g.fillStyle = col; g.fill(); g.lineWidth = 2.5 * U; g.strokeStyle = '#fff'; g.stroke(); };
++  for (const ph of S.photos) { const p = Pt[ph.j]; g.fillStyle = '#fff'; g.beginPath(); g.arc(p[0], p[1], 7 * U, 0, 7); g.fill(); g.fillStyle = th.ink; g.font = `${9 * U}px system-ui, sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText('📷', p[0], p[1]); g.textBaseline = 'alphabetic'; }
++  pin(Pt[0], '#3f9b4f', 6); if (frac >= 1) pin(Pt[n - 1], '#1f1e1d', 6);
++  const me = Pt[cut]; g.beginPath(); g.moveTo(me[0], me[1]); g.lineTo(F[cut][0], F[cut][1]); g.strokeStyle = 'rgba(255,255,255,.7)'; g.lineWidth = 1.5 * U; g.stroke(); pin(me, th.me, 8);
++  // numbers at this moment
++  const d = S.cum[cut], t = S.tim[cut], el = S.alt ? S.alt[cut] : null;
++  const bw = Math.min(w - 24 * U, 380 * U), bh = 62 * U, bx = (w - bw) / 2, by = h - bh - 14 * U;
++  g.fillStyle = th.hud; roundRect(g, bx, by, bw, bh, 12 * U); g.fill();
++  const cols = [[fmtKm(d), 'km'], [fmtClock(t), 'time'], [paceOrSpeed(S.type, d > 50 ? t / (d / 1000) : null), S.type === 'cycle' ? 'km/h' : 'pace /km'], el != null ? [Math.round(el), 'm high'] : [S.a.gain, 'm climbed']];
++  g.textAlign = 'left';
++  cols.forEach(([v, l], i) => { const x = bx + 14 * U + (i * (bw - 20 * U)) / 4; g.fillStyle = '#fff'; g.font = `600 ${19 * U}px system-ui, sans-serif`; g.fillText(String(v), x, by + 30 * U); g.font = `${11 * U}px system-ui, sans-serif`; g.fillStyle = 'rgba(255,255,255,.72)'; g.fillText(l, x, by + 48 * U); });
++  g.textAlign = 'right'; g.fillStyle = sat ? '#fff' : th.ink; g.font = `600 ${13 * U}px system-ui, sans-serif`; g.fillText('Internot AI', w - 14 * U, 24 * U);
++  g.font = `${11 * U}px system-ui, sans-serif`; g.fillText(`${typeName(S.type)} · ${new Date(S.start).toLocaleDateString()}${S.ex > 1.05 ? ` · height ×${S.ex.toFixed(1)}` : ''}`, w - 14 * U, 40 * U);
++  if (sat) { g.font = `${9 * U}px system-ui, sans-serif`; g.fillText('Sentinel-2 cloudless 2016 by EOX', w - 14 * U, 54 * U); }
++}
++function card(g, w, h, th, alpha, lines) {   // a centred panel with a title and lines of text
++  const U = Math.min(w, h) / 400, bw = Math.min(w - 40 * U, 340 * U), lh = 26 * U, bh = 70 * U + lines.length * lh, bx = (w - bw) / 2, by = (h - bh) / 2;
++  g.save(); g.globalAlpha = alpha; g.fillStyle = th.hud; roundRect(g, bx, by, bw, bh, 16 * U); g.fill();
++  g.textAlign = 'center'; g.fillStyle = '#fff'; g.font = `600 ${20 * U}px system-ui, sans-serif`; g.fillText(lines.title.slice(0, 32), w / 2, by + 38 * U);
++  g.font = `${14 * U}px system-ui, sans-serif`; lines.forEach((l, i) => { g.fillStyle = i === 0 && lines.sub ? 'rgba(255,255,255,.75)' : '#fff'; g.fillText(l, w / 2, by + 68 * U + i * lh); });
++  g.restore();
++}
++function photoCard(g, w, h, img, alpha, U) {
++  const k = Math.min((w * 0.82) / img.width, (h * 0.58) / img.height), iw = img.width * k, ih = img.height * k, x = (w - iw) / 2, y = (h - ih) / 2 - 20 * U;
++  g.save(); g.globalAlpha = alpha; g.fillStyle = '#fff'; roundRect(g, x - 8 * U, y - 8 * U, iw + 16 * U, ih + 16 * U, 10 * U); g.fill(); g.drawImage(img, x, y, iw, ih); g.restore();
++}
++
++/* ---------- timing: title card, replay with photo stops, highlights ---------- */
++function schedule(S, lengthS) {
++  const total = Math.max(12000, lengthS * 1000), stops = S.photos.length * PHOTO, move = Math.max(6000, total - INTRO - OUTRO - stops);
++  return { move, total: INTRO + move + stops + OUTRO };
++}
++function stateAt(S, sch, t) {   // what to show at t milliseconds
++  if (t < INTRO) return { frac: 0, intro: Math.max(0, Math.min(1, t / 400, (INTRO - t) / 400)) };
++  const tt = t - INTRO, n1 = Math.max(1, S.xy.length - 1); let paused = 0;
++  for (const ph of S.photos) {   // the replay stops for each photo
++    const at = (ph.j / n1) * sch.move + paused; if (tt < at) break;
++    if (tt < at + PHOTO) { const k = tt - at; return { frac: ph.j / n1, photo: ph, pa: Math.max(0, Math.min(1, k / 300, (PHOTO - k) / 300)) }; }
++    paused += PHOTO;
++  }
++  const m = tt - paused; if (m < sch.move) return { frac: m / sch.move };
++  return { frac: 1, outro: Math.max(0, Math.min(1, (m - sch.move) / 400)) };
++}
++function highlights(S) {
++  const a = S.a, w = settings().weight, lines = [`${fmtKm(a.dist)} km · ${fmtClock(a.moving)}`, `${S.type === 'cycle' ? 'Average speed' : 'Average pace'} ${paceOrSpeed(S.type, a.pace)} ${paceUnit(S.type)}`, `Climbed ${a.gain} m · top speed ${a.maxSpeed.toFixed(1)} km/h`];
++  if (a.best && S.type !== 'cycle') lines.push(`Fastest km ${fmtPace(a.best)}`);
++  const kc = kcal(a, S.type, w); if (kc) lines.push(`About ${kc} kcal`);
++  for (const r of S.records.slice(0, 2)) lines.push(`🏅 ${r.label}: ${r.value}`);
++  lines.title = 'Highlights'; return lines;
++}
++function drawAt(g, w, h, S, sch, t, th, sat) {
++  const st = stateAt(S, sch, t), U = Math.min(w, h) / 400;
++  render(g, w, h, S, st.frac, -0.6 + st.frac * 1.6, th, sat);
++  if (st.intro) { const l = [`${typeName(S.type)} · ${new Date(S.start).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}`, `${fmtKm(S.a.dist)} km`]; l.title = S.run.title || typeName(S.type); l.sub = true; card(g, w, h, th, st.intro, l); }
++  if (st.photo) photoCard(g, w, h, st.photo.img, st.pa, U);
++  if (st.outro != null) card(g, w, h, th, st.outro, highlights(S));
++  return st;
++}
++
++/* ---------- screen ---------- */
++async function build() {
++  const o = R.open; if (!o) return null; const v = settings().video;
++  $('run-3d-note').textContent = v.ground === 'satellite' ? 'Getting the satellite pictures…' : '';
++  const S = await scene(o.run, o.a); if (!S) { $('run-3d-note').textContent = 'The whole route is inside your privacy zone, so there is nothing to show. Change it under Settings.'; return null; }
++  S.sat = v.ground === 'satellite' ? await satGround(S) : null;
++  $('run-3d-note').textContent = v.ground === 'satellite' && !S.sat ? 'Satellite pictures for this place are not on the phone. Showing the map instead.' : settings().privacy ? 'Your privacy zone is left out of the replay.' : '';
++  R.scene = S; return S;
++}
++export async function open3d() {
++  const o = R.open; if (!o || o.a.n < 2) return;
++  const v = settings().video; $('run-v-shape').value = v.shape; $('run-v-style').value = v.style; $('run-v-ground').value = v.ground; $('run-v-length').value = String(v.length);
++  $('run-3d').hidden = false; const S = await build(); if (S) play3d();
++}
++export function play3d(record) {
++  stop3d(true); const c = $('run-3d-canvas'), S = R.scene; if (!S) return Promise.resolve();
++  const v = settings().video, [w, h] = SHAPES[v.shape] || SHAPES.tall, th = THEMES[v.style] || THEMES.orange, sch = schedule(S, +v.length || 30);
++  c.width = w; c.height = h; const g = c.getContext('2d');
++  R.videoInfo = { w, h, ground: S.sat ? 'satellite' : 'map', satTiles: S.sat ? S.sat.tiles : 0, photos: S.photos.length, ms: sch.total, style: v.style };
++  const t0 = performance.now();
++  return new Promise((done) => {
++    const frame = (now) => {
++      const t = now - t0; drawAt(g, w, h, S, sch, Math.min(t, sch.total), th, S.sat);
++      if (t < sch.total) R.anim = requestAnimationFrame(frame); else { R.anim = null; R.played = (R.played || 0) + 1; done(); }
++    };
++    R.anim = requestAnimationFrame(frame); R.animDone = done;
++  });
++}
++export function stop3d(keepOpen) { if (R.anim) cancelAnimationFrame(R.anim); R.anim = null; R.animDone?.(); R.animDone = null; if (!keepOpen && $('run-3d')) $('run-3d').hidden = true; }
++export async function saveVideo() {
++  const c = $('run-3d-canvas'), btn = $('run-3d-video'), note = $('run-3d-note');
++  if (!R.scene) return;
++  if (!c.captureStream || !window.MediaRecorder) { note.textContent = 'This phone cannot make videos here. Use the phone\'s screen recorder while the replay plays.'; return; }
++  const type = ['video/mp4;codecs=avc1', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t));
++  if (!type) { note.textContent = 'This phone cannot make videos here. Use the phone\'s screen recorder while the replay plays.'; return; }
++  const secs = Math.round(schedule(R.scene, +settings().video.length || 30).total / 1000);
++  btn.disabled = true; note.textContent = `Making the video… keep this screen open (about ${secs} seconds).`;
++  const stream = c.captureStream(30), rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 3000000 }), parts = [];
++  rec.ondataavailable = (e) => e.data.size && parts.push(e.data);
++  const stopped = new Promise((r) => (rec.onstop = r)); rec.start(500);
++  await play3d(true); rec.stop(); await stopped; stream.getTracks().forEach((t) => t.stop());
++  const blob = new Blob(parts, { type: type.split(';')[0] }), ext = type.startsWith('video/mp4') ? 'mp4' : 'webm';
++  const name = `internot-${R.open?.run.type || 'run'}-${new Date(R.scene.start).toISOString().slice(0, 10)}.${ext}`;
++  R.lastVideo = { bytes: blob.size, type: blob.type, name, ...R.videoInfo };
++  try { await shareFile(blob, name, 'Share your video'); note.textContent = `Video ready (${(blob.size / 1048576).toFixed(1)} MB). Choose where to save or send it.`; }
++  catch (e) { note.textContent = 'Could not save the video: ' + (e?.message || e); }
++  btn.disabled = false; play3d();
++}
++export function initVideo() {
++  $('run-3d-close').onclick = () => stop3d(); $('run-3d-play').onclick = () => play3d(); $('run-3d-video').onclick = saveVideo;
++  const change = async () => {
++    const video = { shape: $('run-v-shape').value, style: $('run-v-style').value, ground: $('run-v-ground').value, length: +$('run-v-length').value };
++    const groundChanged = video.ground !== settings().video.ground; saveSettings({ video });
++    if (groundChanged || !R.scene) await build(); if (R.scene) play3d();
++  };
++  for (const id of ['run-v-shape', 'run-v-style', 'run-v-ground', 'run-v-length']) $(id).onchange = change;
++}
+diff --git a/internot-ai-v0.4/run.js b/internot-ai-v0.4/run.js
+index a2d05d6..6e3138b 100644
+--- a/internot-ai-v0.4/run.js
++++ b/internot-ai-v0.4/run.js
+@@ -1,9 +1,29 @@
+-// Run and walk: records a route with the phone's GPS (no internet), shows distance, time, pace, splits and
+-// climbing, keeps a history on this device, shows a run on the offline map, and plays it back in 3D,
+-// with a video to save or share. In the Android app the recording carries on with the screen off.
++// Run, walk, hike and ride: records a route with the phone's GPS (no internet), shows distance, time, pace,
++// splits, climbing, calories and speed, keeps a history on this device with records, badges, goals and totals,
++// takes photos along the way, shows routes on the offline map, and plays an activity back in 3D as a video.
++// In the Android app the recording and the voice coach carry on with the screen off.
++import { initExtra, bestsOf, newRecords, earnedBadges, renderGoals, renderRecords, renderTotals, BADGES } from './run-extra.js';
++import { open3d, stop3d, play3d, saveVideo, initVideo } from './run-video.js';
++
+ const $ = (id) => document.getElementById(id);
+-const RUN = window.Capacitor ? window.capacitorExports?.registerPlugin?.('Run') : null;
+-const R = { root: null, list: [], live: null, timer: 0, poll: 0, watch: null, lock: null, open: null, type: 'run', anim: null };
++export const RUN = window.Capacitor ? window.capacitorExports?.registerPlugin?.('Run') : null;
++export const R = { root: null, list: [], live: null, timer: 0, poll: 0, watch: null, lock: null, open: null, type: 'run', anim: null };
++
++/* ---------- activity types ---------- */
++// max: faster than this between two fixes is a GPS jump, not you (m/s). still: slower than this over 10 seconds counts as standing still.
++export const TYPES = {
++  run: { name: 'Run', max: 12, still: 0.5, verb: 'run' },
++  walk: { name: 'Walk', max: 4, still: 0.25, verb: 'walk' },
++  hike: { name: 'Hike', max: 4, still: 0.2, verb: 'hike' },
++  cycle: { name: 'Ride', max: 30, still: 1, verb: 'ride' },
++};
++export const typeName = (t) => (TYPES[t] || TYPES.run).name;
++
++/* ---------- settings (kept on this phone) ---------- */
++const DEFAULTS = { weight: 70, height: 170, voice: true, every: '1000', autoPause: true, weekGoal: 0, monthGoal: 0, privacy: null,
++  video: { shape: 'tall', style: 'orange', ground: 'map', length: 30 } };
++export function settings() { try { const s = JSON.parse(localStorage.getItem('runSettings') || '{}'); return { ...DEFAULTS, ...s, video: { ...DEFAULTS.video, ...(s.video || {}) } }; } catch { return { ...DEFAULTS }; } }
++export function saveSettings(patch) { const s = { ...settings(), ...patch }; try { localStorage.setItem('runSettings', JSON.stringify(s)); } catch {} return s; }
+ 
+ /* ---------- numbers ---------- */
+ const RAD = Math.PI / 180;
+@@ -14,29 +34,37 @@ export function hav(a, b) {   // metres between two [lat, lon]
+ }
+ export const fmtClock = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+ export const fmtPace = (secPerKm) => (!secPerKm || !isFinite(secPerKm) || secPerKm > 5999 ? '–' : fmtClock(secPerKm));
+-const fmtKm = (m) => (m / 1000).toFixed(2);
++export const fmtKm = (m) => (m / 1000).toFixed(2);
++export const EFFORTS = [[1000, '1 km'], [5000, '5 km'], [10000, '10 km'], [21097.5, 'Half marathon'], [42195, 'Marathon']];
++const P = (p) => [p[1], p[2]];
+ 
+ // One fix: [time ms, lat, lon, altitude m (-9999 = none), accuracy m (-1 = none), speed m/s, segment]
+-export function analyse(raw, type = 'run') {
+-  const maxSpeed = type === 'walk' ? 4 : 12;   // faster than this between two fixes is a GPS jump, not you
++export function analyse(raw, type = 'run', opt = {}) {
++  const T = TYPES[type] || TYPES.run, still = opt.autoPause === false ? 0 : T.still;
+   const pts = [];
+   for (const p of raw) {
+     if (p[4] > 40) continue;   // poor fix
+     const prev = pts[pts.length - 1];
+     if (prev && prev[6] === p[6]) {
+       const dt = (p[0] - prev[0]) / 1000; if (dt <= 0) continue;
+-      if (hav([prev[1], prev[2]], [p[1], p[2]]) / dt > maxSpeed) continue;
++      if (hav(P(prev), P(p)) / dt > T.max) continue;
+     }
+     pts.push(p);
+   }
+-  let dist = 0, moving = 0; const cum = [0], tim = [0];
++  // distance and moving time; standing still (less than `still` m/s over the last 10 seconds) is left out: auto-pause
++  let dist = 0, moving = 0, w0 = 0, maxSpeed = 0; const cum = [0], tim = [0], spd = [null], mov = [false];
+   for (let i = 1; i < pts.length; i++) {
+     const a = pts[i - 1], b = pts[i];
+-    if (a[6] === b[6]) { dist += hav([a[1], a[2]], [b[1], b[2]]); moving += Math.min(60, (b[0] - a[0]) / 1000); }
+-    cum.push(dist); tim.push(moving);
++    if (a[6] !== b[6]) { w0 = i; cum.push(dist); tim.push(moving); spd.push(null); mov.push(false); continue; }
++    while (w0 < i - 1 && b[0] - pts[w0 + 1][0] >= 10000) w0++;
++    const span = (b[0] - pts[w0][0]) / 1000, v = span > 0 ? hav(P(pts[w0]), P(b)) / span : 0;
++    const moved = span < 3 || v >= still;
++    if (moved) { dist += hav(P(a), P(b)); moving += Math.min(60, (b[0] - a[0]) / 1000); }
++    if (span >= 5 && moved) maxSpeed = Math.max(maxSpeed, v);
++    cum.push(dist); tim.push(moving); spd.push(span >= 3 ? v : null); mov.push(moved);
+   }
+   // climbing: smoothed altitude, and only rises of 3 m or more count (GPS height wobbles)
+-  const alt = pts.map((p) => (p[3] > -9000 ? p[3] : null)); const has = alt.filter((a) => a != null).length > pts.length * 0.5;
++  const alt = pts.map((p) => (p[3] > -9000 ? p[3] : null)); const has = pts.length > 1 && alt.filter((a) => a != null).length > pts.length * 0.5;
+   const smooth = []; let gain = 0, loss = 0, lo = Infinity, hi = -Infinity;
+   if (has) {
+     for (let i = 0; i < pts.length; i++) { let s = 0, n = 0; for (let j = Math.max(0, i - 3); j <= Math.min(pts.length - 1, i + 3); j++) if (alt[j] != null) { s += alt[j]; n++; } smooth.push(n ? s / n : null); }
+@@ -55,25 +83,85 @@ export function analyse(raw, type = 'run') {
+   const rest = dist - (k - 1) * 1000; if (splits.length && rest >= 100) splits.push({ km: +(dist / 1000).toFixed(2), time: moving - lastT, part: rest, climb: null });
+   const elapsed = pts.length ? (pts[pts.length - 1][0] - pts[0][0]) / 1000 : 0;
+   let best = null; for (const s of splits) if (!s.part && (best == null || s.time < best)) best = s.time;
++  // best efforts: the fastest stretch of 1 km, 5 km, ... inside this activity
++  const efforts = {};
++  for (const [D] of EFFORTS) {
++    if (dist < D) continue; let i = 0, fast = Infinity;
++    for (let j = 1; j < cum.length; j++) {
++      while (i < j - 1 && cum[j] - cum[i + 1] >= D) i++;
++      const d = cum[j] - cum[i]; if (d >= D) fast = Math.min(fast, (tim[j] - tim[i]) * (D / d));
++    }
++    if (isFinite(fast)) efforts[D] = Math.round(fast);
++  }
+   return {
+-    dist, moving, elapsed, pace: dist > 50 ? moving / (dist / 1000) : null, speed: moving > 0 ? dist / moving * 3.6 : 0,
+-    gain: Math.round(gain), loss: Math.round(loss), low: has ? Math.round(lo) : null, high: has ? Math.round(hi) : null, best,
+-    splits, n: pts.length, clean: pts, cum, tim, alt: has ? smooth : null,
++    dist, moving, elapsed, pace: dist > 50 ? moving / (dist / 1000) : null, speed: moving > 0 ? dist / moving * 3.6 : 0, maxSpeed: maxSpeed * 3.6,
++    gain: Math.round(gain), loss: Math.round(loss), low: has ? Math.round(lo) : null, high: has ? Math.round(hi) : null, best, efforts,
++    splits, n: pts.length, clean: pts, cum, tim, spd, mov, alt: has ? smooth : null,
+   };
+ }
++// Calories, worked out from speed, climbing and body weight (ACSM walking and running formulas; cycling by speed).
++export function kcal(a, type, weight) {
++  const hours = a.moving / 3600; if (!hours || !weight) return 0;
++  const S = (a.dist / a.moving) * 60, G = a.dist > 0 ? Math.min(0.3, a.gain / a.dist) : 0;   // metres a minute, uphill grade
++  let met;
++  if (type === 'cycle') { const k = a.speed; met = k < 16 ? 4 : k < 19 ? 6.8 : k < 22 ? 8 : k < 25 ? 10 : 12; }
++  else if (type === 'run') met = (0.2 * S + 0.9 * S * G + 3.5) / 3.5;
++  else met = (0.1 * S + 1.8 * S * G + 3.5) / 3.5;
++  return Math.round(met * weight * hours);
++}
+ const nowPace = (pts) => {   // pace over the last 30 seconds or so
+   const end = pts[pts.length - 1]; if (!end) return null; let d = 0, i = pts.length - 1;
+-  while (i > 0 && end[0] - pts[i - 1][0] <= 30000 && pts[i - 1][6] === end[6]) { d += hav([pts[i - 1][1], pts[i - 1][2]], [pts[i][1], pts[i][2]]); i--; }
++  while (i > 0 && end[0] - pts[i - 1][0] <= 30000 && pts[i - 1][6] === end[6]) { d += hav(P(pts[i - 1]), P(pts[i])); i--; }
+   const t = (end[0] - pts[i][0]) / 1000; return d > 15 && t > 5 ? t / (d / 1000) : null;
+ };
++const isCycle = (t) => t === 'cycle';
++export const paceOrSpeed = (type, secPerKm) => (isCycle(type) ? (secPerKm ? (3600 / secPerKm).toFixed(1) : '–') : fmtPace(secPerKm));
++export const paceUnit = (type) => (isCycle(type) ? 'km/h' : '/km');
+ 
+-/* ---------- saved runs (a private folder on this device) ---------- */
+-async function readJSON(name, fallback) { try { const h = await R.root.getFileHandle(name); return JSON.parse(await (await h.getFile()).text()); } catch { return fallback; } }
+-async function writeJSON(name, v) { if (!R.root) return; const h = await R.root.getFileHandle(name, { create: true }); const w = await h.createWritable(); await w.write(JSON.stringify(v)); await w.close(); }
++/* ---------- privacy zone: parts of a route inside it are left out of anything shared ---------- */
++export function privatePts(pts) {
++  const z = settings().privacy; if (!z) return pts;
++  return pts.filter((p) => hav([z.lat, z.lon], P(p)) > z.r);
++}
++
++/* ---------- saved runs and photos (a private folder on this device) ---------- */
++export async function readJSON(name, fallback) { try { const h = await R.root.getFileHandle(name); return JSON.parse(await (await h.getFile()).text()); } catch { return fallback; } }
++export async function writeJSON(name, v) { if (!R.root) return; const h = await R.root.getFileHandle(name, { create: true }); const w = await h.createWritable(); await w.write(JSON.stringify(v)); await w.close(); }
++async function writeBlob(name, blob) { const h = await R.root.getFileHandle(name, { create: true }); const w = await h.createWritable(); await w.write(blob); await w.close(); }
++export async function readBlob(name) { try { return await (await R.root.getFileHandle(name)).getFile(); } catch { return null; } }
+ const saveList = () => writeJSON('runs.json', R.list);
++export const loadRun = (id) => readJSON('run-' + id + '.json', null);
++const saveRun = (run) => writeJSON('run-' + run.id + '.json', run);
++async function shrinkPhoto(file) {   // photos are kept at most 1280 pixels across
++  const img = await createImageBitmap(file); const k = Math.min(1, 1280 / Math.max(img.width, img.height));
++  const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
++  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); img.close?.();
++  return new Promise((ok) => c.toBlob(ok, 'image/jpeg', 0.82));
++}
++export async function shareFile(blob, name, title) {   // the phone's share menu (save, WhatsApp, Quick Share...), or a download on the web
++  if (RUN) {
++    const data = await new Promise((ok, bad) => { const fr = new FileReader(); fr.onload = () => ok(String(fr.result).split(',')[1]); fr.onerror = bad; fr.readAsDataURL(blob); });
++    return RUN.shareVideo({ data, name, type: blob.type, title });
++  }
++  const u = URL.createObjectURL(blob), l = document.createElement('a'); l.href = u; l.download = name; document.body.append(l); l.click(); l.remove(); setTimeout(() => URL.revokeObjectURL(u), 30000);
++}
++const speak = (text) => { try { window.internotMap?.api?.speak?.(text); } catch {} };
++const sayKm = (m) => { const k = m / 1000; return (Math.abs(k - Math.round(k)) < 0.005 ? String(Math.round(k)) : k.toFixed(1)) + (Math.round(k * 100) === 100 ? ' kilometre' : ' kilometres'); };
++const sayClock = (s) => { s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = s % 60; return [h && `${h} hour${h > 1 ? 's' : ''}`, (m || h) && `${m} minute${m !== 1 ? 's' : ''}`, !h && `${x} second${x !== 1 ? 's' : ''}`].filter(Boolean).join(' '); };
+ 
+ /* ---------- recording ---------- */
+-const setLive = (patch) => { R.live = R.live ? { ...R.live, ...patch } : patch; try { if (R.live) localStorage.setItem('runLive', JSON.stringify({ type: R.live.type, start: R.live.start, state: R.live.state })); else localStorage.removeItem('runLive'); } catch {} };
++const GOALS = { none: [0, 0], d3: [3000, 0], d5: [5000, 0], d10: [10000, 0], d21: [21097.5, 0], d42: [42195, 0], t30: [0, 1800], t60: [0, 3600] };
++function coachFor(type, goal) {   // what the voice coach says, and when (spoken by the phone, also with the screen off)
++  const s = settings(); const [goalM, goalS] = GOALS[goal] || [0, 0];
++  if (!s.voice) return null;
++  const every = String(s.every), T = TYPES[type] || TYPES.run;
++  return { everyM: every.startsWith('t') ? 0 : +every, everyS: every.startsWith('t') ? +every.slice(1) : 0, pace: type !== 'cycle', goalM, goalS,
++    maxSpeed: T.max, still: s.autoPause ? T.still : 0, hello: `Starting your ${T.verb}. Have a good one!` };
++}
++const setLive = (patch) => {
++  R.live = R.live ? { ...R.live, ...patch } : patch;
++  try { if (R.live) localStorage.setItem('runLive', JSON.stringify({ type: R.live.type, start: R.live.start, state: R.live.state, goal: R.live.goal, photos: R.live.photos || [] })); else localStorage.removeItem('runLive'); } catch {}
++};
+ async function lockScreen(on) {   // web app only: the screen has to stay on for the browser to keep the GPS
+   try { if (on && !R.lock && navigator.wakeLock) R.lock = await navigator.wakeLock.request('screen'); if (!on && R.lock) { await R.lock.release(); R.lock = null; } } catch {}
+ }
+@@ -87,276 +175,335 @@ function webWatch(on) {
+     if (L.pts.length % 15 === 0) writeJSON('run-current.json', L).catch(() => {});
+   }, (e) => { if (R.live) R.live.err = e.code === 1 ? 'Allow location for this page to record a run.' : ''; renderLive(); }, { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+ }
++function webCoach(a) {   // the web app speaks for itself (the Android app's recorder does this natively)
++  const L = R.live, c = L?.coach; if (RUN || !c) return; const st = L.coachState || (L.coachState = { next: 0, half: false, goal: false });
++  const mark = c.everyM ? a.dist : c.everyS ? a.moving : 0, step = c.everyM || c.everyS;
++  if (step && mark >= (st.next || step)) { st.next = (Math.floor(mark / step) + 1) * step; speak(`${sayKm(Math.floor(a.dist / 10) * 10)}. Time ${sayClock(a.moving)}.` + (c.pace && a.pace && a.pace <= 3600 ? ` Average pace ${Math.floor(Math.round(a.pace) / 60)} ${String(Math.round(a.pace) % 60).padStart(2, '0')} per kilometre.` : '')); }
++  const prog = c.goalM ? a.dist / c.goalM : c.goalS ? a.moving / c.goalS : 0;
++  if (prog >= 0.5 && !st.half) { st.half = true; speak('Halfway to your goal.'); }
++  if (prog >= 1 && !st.goal) { st.goal = true; speak('Goal reached. Well done!'); }
++}
+ async function pull() {   // new fixes from the recorder
+   const L = R.live; if (!L) return;
+   if (RUN) {
+     try {
+       const r = await RUN.points({ from: L.pts.length }); for (const p of r.points) L.pts.push(p);
+-      const s = await RUN.status(); L.acc = s.accuracy; L.lastFix = s.lastFix; L.err = s.error || (!s.gps ? 'Location (GPS) is switched off.' : '');
++      const s = await RUN.status(); L.acc = s.accuracy; L.lastFix = s.lastFix; L.said = s.said; L.err = s.error || (!s.gps ? 'Location (GPS) is switched off.' : '');
+     } catch (e) { L.err = String(e?.message || e); }
+   }
+   renderLive();
+ }
+ async function start() {
+   if (R.live) return;
+-  setLive({ type: R.type, start: Date.now(), state: 'on', pts: [], seg: 0, acc: -1, err: '' });
++  const goal = $('run-goal')?.value || 'none', coach = coachFor(R.type, goal);
++  setLive({ type: R.type, start: Date.now(), state: 'on', pts: [], seg: 0, acc: -1, err: '', goal, photos: [], coach });
+   if (RUN) {
+-    try { await RUN.start({ keep: false }); }
++    try { await RUN.start({ keep: false, coach }); }
+     catch (e) { R.live = null; setLive(null); renderLive(String(e?.message || e)); return; }
+-  } else { if (!navigator.geolocation) { R.live = null; setLive(null); renderLive('This browser has no GPS. Use the Android app.'); return; } webWatch(true); lockScreen(true); }
++  } else {
++    if (!navigator.geolocation) { R.live = null; setLive(null); renderLive('This browser has no GPS. Use the Android app.'); return; }
++    webWatch(true); lockScreen(true); if (coach?.hello) speak(coach.hello);
++  }
+   startTimers(); renderLive();
+ }
+ function startTimers() { clearInterval(R.timer); clearInterval(R.poll); R.timer = setInterval(renderLive, 1000); R.poll = setInterval(pull, 2000); pull(); }
+ async function pause() {
+   const L = R.live; if (!L) return;
+-  if (L.state === 'on') { setLive({ state: 'paused' }); if (RUN) await RUN.pause().catch(() => {}); }
+-  else { setLive({ state: 'on', seg: L.seg + 1 }); if (RUN) await RUN.resume().catch(() => {}); }
++  if (L.state === 'on') { setLive({ state: 'paused' }); if (RUN) await RUN.pause().catch(() => {}); else if (L.coach) speak('Paused.'); }
++  else { setLive({ state: 'on', seg: L.seg + 1 }); if (RUN) await RUN.resume().catch(() => {}); else if (L.coach) speak('Resumed.'); }
++  renderLive();
++}
++async function takePhoto(files) {   // photos taken during the activity are placed where you were
++  const L = R.live; if (!L || !files?.length) return;
++  for (const f of files) {
++    try {
++      const last = L.pts[L.pts.length - 1], n = (L.photos || []).length, name = `run-photo-${L.start}-${n}.jpg`;
++      await writeBlob(name, await shrinkPhoto(f));
++      setLive({ photos: [...(L.photos || []), { name, t: Date.now(), lat: last ? last[1] : null, lon: last ? last[2] : null }] });
++    } catch (e) { R.live.err = 'Could not keep the photo: ' + (e?.message || e); }
++  }
+   renderLive();
+ }
++export function summaryOf(run, a) {
++  const w = settings().weight;
++  return { id: run.id, type: run.type, start: run.start, title: run.title || '', dist: Math.round(a.dist), moving: Math.round(a.moving), gain: a.gain, pace: a.pace,
++    maxSpeed: +a.maxSpeed.toFixed(1), kcal: kcal(a, run.type, w), efforts: a.efforts, photos: (run.photos || []).length };
++}
+ async function finish() {
+   const L = R.live; if (!L) return;
+   await pull(); clearInterval(R.timer); clearInterval(R.poll);
+   if (RUN) await RUN.stop().catch(() => {}); else { webWatch(false); lockScreen(false); }
+-  const a = analyse(L.pts, L.type);
++  const a = analyse(L.pts, L.type, settings());
+   if (a.n < 2 || a.dist < 20) {
+-    if (!confirm('Too little was recorded to save (no GPS fix, or you did not move). Throw it away?')) { startTimers(); if (RUN) await RUN.start({ keep: true }).catch(() => {}); else { webWatch(true); lockScreen(true); } return; }
++    if (!confirm('Too little was recorded to save (no GPS fix, or you did not move). Throw it away?')) { startTimers(); if (RUN) await RUN.start({ keep: true, coach: L.coach }).catch(() => {}); else { webWatch(true); lockScreen(true); } return; }
++    for (const p of L.photos || []) try { await R.root.removeEntry(p.name); } catch {}
+   } else {
+-    const id = String(L.start);
+-    await writeJSON('run-' + id + '.json', { id, type: L.type, start: L.start, pts: L.pts });
+-    R.list.unshift({ id, type: L.type, start: L.start, dist: Math.round(a.dist), moving: Math.round(a.moving), gain: a.gain, pace: a.pace });
+-    await saveList();
++    const id = String(L.start), run = { id, type: L.type, start: L.start, pts: L.pts, photos: L.photos || [], goal: L.goal, title: '', note: '' };
++    const sum = summaryOf(run, a), before = R.list.slice(), badgesBefore = new Set(earnedBadges(before).map((b) => b.id));
++    run.records = newRecords(before, sum); run.badges = earnedBadges([sum, ...before]).filter((b) => !badgesBefore.has(b.id)).map((b) => b.id);
++    await saveRun(run); R.list.unshift(sum); await saveList();
++    speak(`${typeName(L.type)} saved. ${sayKm(a.dist)} in ${sayClock(a.moving)}.` + (run.records.length ? ` New personal record: ${run.records[0].label}.` : '') + (run.badges.length ? ' You earned a new badge.' : ''));
+   }
+   if (RUN) await RUN.clear().catch(() => {});
+   try { await R.root?.removeEntry('run-current.json'); } catch {}
+-  const id = String(L.start); R.live = null; setLive(null); renderLive(); renderList();
++  const id = String(L.start); R.live = null; setLive(null); renderLive(); renderHome();
+   if (R.list[0]?.id === id) openRun(id);
+ }
+-async function recover() {   // the app was closed during a run: carry on with what was recorded
++async function recover() {   // the app was closed during an activity: carry on with what was recorded
+   let saved = null; try { saved = JSON.parse(localStorage.getItem('runLive') || 'null'); } catch {}
+   if (!saved) return;
++  const coach = coachFor(saved.type, saved.goal);
+   if (RUN) {
+     const s = await RUN.status().catch(() => null); if (!s) return;
+     if (!s.running && !s.count) { localStorage.removeItem('runLive'); return; }
+-    R.live = { ...saved, pts: [], seg: 0, acc: -1, err: '' };
+-    if (!s.running) { await RUN.start({ keep: true }).catch(() => {}); if (saved.state === 'paused') await RUN.pause().catch(() => {}); }
++    R.live = { ...saved, pts: [], seg: 0, acc: -1, err: '', coach };
++    if (!s.running) { await RUN.start({ keep: true, coach }).catch(() => {}); if (saved.state === 'paused') await RUN.pause().catch(() => {}); }
+     else R.live.state = s.paused ? 'paused' : 'on';
+     await pull(); R.live.seg = R.live.pts.length ? R.live.pts[R.live.pts.length - 1][6] : 0;
+   } else {
+     const cur = await readJSON('run-current.json', null); if (!cur) { localStorage.removeItem('runLive'); return; }
+-    R.live = { ...cur, state: 'paused', seg: (cur.seg || 0) + 1 }; webWatch(true); lockScreen(true);
++    R.live = { ...cur, photos: saved.photos || cur.photos || [], state: 'paused', seg: (cur.seg || 0) + 1, coach }; webWatch(true); lockScreen(true);
+   }
+   startTimers(); renderLive();
+ }
+ 
+ /* ---------- screens ---------- */
+-function stat(label, value, unit = '') { return `<div class="run-stat"><b>${value}</b>${unit ? `<i>${unit}</i>` : ''}<small>${label}</small></div>`; }
++export function stat(label, value, unit = '') { return `<div class="run-stat"><b>${value}</b>${unit ? `<i>${unit}</i>` : ''}<small>${label}</small></div>`; }
++const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
++export const titleOf = (r) => r.title || `${typeName(r.type)} · ${when(r.start)}`;
+ function renderLive(errText) {
+   const L = R.live, box = $('run-live-stats'); if (!box) return;
+-  $('run-type').hidden = !!L;
+-  $('run-start').hidden = !!L; $('run-pause').hidden = !L; $('run-finish').hidden = !L;
+-  $('run-history-box').hidden = !!L;
++  $('run-setup').hidden = !!L;
++  $('run-start').hidden = !!L; $('run-pause').hidden = !L; $('run-finish').hidden = !L; $('run-photo').hidden = !L;
++  $('run-history-box').hidden = !!L; $('run-goalbar').hidden = true;
+   if (!L) {
+-    box.innerHTML = stat('kilometres', '0.00') + stat('time', '0:00') + stat('average pace', '–', '/km') + stat('climbed', '0', 'm');
+-    $('run-gps').textContent = errText || (RUN ? 'Uses GPS only: no internet, no airtime. Recording carries on with the screen off.' : 'Uses GPS only, no internet. Keep this page open and the screen on while recording.');
+-    $('run-gps').className = 'hint' + (errText ? ' err' : ''); drawTrace(null); return;
++    box.innerHTML = stat('kilometres', '0.00') + stat('time', '0:00') + stat(isCycle(R.type) ? 'average speed' : 'average pace', '–', paceUnit(R.type)) + stat('climbed', '0', 'm');
++    $('run-gps').textContent = errText || (RUN ? 'Uses GPS only: no internet, no airtime. Recording and the voice coach carry on with the screen off.' : 'Uses GPS only, no internet. Keep this page open and the screen on while recording.');
++    $('run-gps').className = 'hint' + (errText ? ' err' : ''); drawTrace($('run-trace'), null); return;
+   }
+-  const a = analyse(L.pts, L.type);
+-  const elapsed = L.state === 'on' || !L.pts.length ? a.moving + (L.state === 'on' && L.pts.length ? Math.max(0, (Date.now() - L.pts[L.pts.length - 1][0]) / 1000) : 0) : a.moving;
+-  box.innerHTML = stat('kilometres', fmtKm(a.dist)) + stat('time', fmtClock(L.pts.length ? elapsed : (Date.now() - L.start) / 1000)) +
+-    stat('average pace', fmtPace(a.pace), '/km') + stat('pace now', fmtPace(nowPace(a.clean)), '/km') + stat('climbed', a.gain, 'm') + stat(a.alt ? 'height' : 'fixes', a.alt ? Math.round(a.alt[a.alt.length - 1] ?? 0) : a.n, a.alt ? 'm' : '');
++  const s = settings(), a = analyse(L.pts, L.type, s); webCoach(a);
++  const last = L.pts[L.pts.length - 1], growing = L.state === 'on' && last && a.mov[a.mov.length - 1];
++  const time = a.moving + (growing ? Math.max(0, Math.min(5, (Date.now() - last[0]) / 1000)) : 0);
++  const stillNow = L.state === 'on' && a.n > 3 && a.mov[a.mov.length - 1] === false && s.autoPause;
++  box.innerHTML = stat('kilometres', fmtKm(a.dist)) + stat('time', fmtClock(L.pts.length ? time : 0)) +
++    stat(isCycle(L.type) ? 'average speed' : 'average pace', paceOrSpeed(L.type, a.pace), paceUnit(L.type)) + stat(isCycle(L.type) ? 'speed now' : 'pace now', paceOrSpeed(L.type, nowPace(a.clean)), paceUnit(L.type)) +
++    stat('climbed', a.gain, 'm') + stat('calories (about)', kcal(a, L.type, s.weight), 'kcal');
+   $('run-pause').textContent = L.state === 'on' ? 'Pause' : 'Resume';
++  const [goalM, goalS] = GOALS[L.goal] || [0, 0];
++  if (goalM || goalS) { const p = Math.min(1, goalM ? a.dist / goalM : a.moving / goalS); $('run-goalbar').hidden = false; $('run-goalbar-fill').style.width = (p * 100).toFixed(1) + '%'; $('run-goalbar-text').textContent = `Goal ${goalM ? sayKm(goalM).replace('kilometres', 'km').replace('kilometre', 'km') : fmtClock(goalS)} · ${Math.round(p * 100)}%`; }
+   const fresh = L.lastFix && Date.now() - L.lastFix < 10000;
+   $('run-gps').className = 'hint' + (L.err ? ' err' : '');
+-  $('run-gps').textContent = L.err || (L.state === 'paused' ? 'Paused. Distance is not counted until you press Resume.' : !fresh ? 'Waiting for GPS… Stand outside with a clear view of the sky.' : `Recording · GPS accurate to about ${Math.round(L.acc)} m`);
+-  drawTrace(a.clean);
++  $('run-gps').textContent = L.err || (L.state === 'paused' ? 'Paused. Distance is not counted until you press Resume.' : !fresh ? 'Waiting for GPS… Stand outside with a clear view of the sky.'
++    : stillNow ? 'Auto-paused while you stand still. Start moving to carry on.' : `Recording · GPS accurate to about ${Math.round(L.acc)} m` + ((L.photos || []).length ? ` · ${(L.photos || []).length} photo${L.photos.length > 1 ? 's' : ''}` : ''));
++  drawTrace($('run-trace'), a.clean, L.photos);
+ }
+-function drawTrace(pts) {   // the live route, a simple line that fills the box
+-  const c = $('run-trace'); if (!c) return; const w = c.clientWidth, h = c.clientHeight; if (!w) return;
++export function drawTrace(c, pts, photos) {   // a route as a simple line that fills the box
++  if (!c) return; const w = c.clientWidth, h = c.clientHeight; if (!w) return;
+   const dpr = window.devicePixelRatio || 1; c.width = w * dpr; c.height = h * dpr; const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+   if (!pts || pts.length < 2) { g.fillStyle = '#6b6860'; g.font = '14px system-ui, sans-serif'; g.textAlign = 'center'; g.fillText('Your route will appear here', w / 2, h / 2); return; }
+-  const P = project2d(pts, w, h, 18); g.lineJoin = g.lineCap = 'round';
+-  g.beginPath(); P.forEach(([x, y], i) => (i && pts[i][6] === pts[i - 1][6] ? g.lineTo(x, y) : g.moveTo(x, y))); g.strokeStyle = '#d97757'; g.lineWidth = 4; g.stroke();
+-  const [sx, sy] = P[0], [ex, ey] = P[P.length - 1];
++  const pr = projector(pts, w, h, 18), Q = pts.map(pr); g.lineJoin = g.lineCap = 'round';
++  g.beginPath(); Q.forEach(([x, y], i) => (i && pts[i][6] === pts[i - 1][6] ? g.lineTo(x, y) : g.moveTo(x, y))); g.strokeStyle = '#d97757'; g.lineWidth = 4; g.stroke();
++  const [sx, sy] = Q[0], [ex, ey] = Q[Q.length - 1];
+   g.fillStyle = '#3f9b4f'; g.beginPath(); g.arc(sx, sy, 5, 0, 7); g.fill(); g.fillStyle = '#2f6fde'; g.beginPath(); g.arc(ex, ey, 6, 0, 7); g.fill();
++  for (const ph of photos || []) if (ph.lat != null) { const [x, y] = pr([0, ph.lat, ph.lon]); g.fillStyle = '#fff'; g.strokeStyle = '#1f1e1d'; g.lineWidth = 2; g.beginPath(); g.arc(x, y, 6, 0, 7); g.fill(); g.stroke(); }
+ }
+-function project2d(pts, w, h, pad) {
++export function projector(pts, w, h, pad) {   // [.., lat, lon] → [x, y] in a w × h box, north up
+   let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity; for (const p of pts) { a = Math.min(a, p[1]); c = Math.max(c, p[1]); b = Math.min(b, p[2]); d = Math.max(d, p[2]); }
+   const k = Math.cos(((a + c) / 2) * RAD), sx = (d - b) * k || 1e-9, sy = (c - a) || 1e-9, s = Math.min((w - 2 * pad) / sx, (h - 2 * pad) / sy);
+-  const ox = (w - sx * s) / 2, oy = (h - sy * s) / 2; return pts.map((p) => [ox + (p[2] - b) * k * s, h - oy - (p[1] - a) * s]);
++  const ox = (w - sx * s) / 2, oy = (h - sy * s) / 2; return (p) => [ox + (p[2] - b) * k * s, h - oy - (p[1] - a) * s];
+ }
+-const when = (t) => new Date(t).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+-const typeName = (t) => (t === 'walk' ? 'Walk' : 'Run');
+-function renderList() {
++export const when = (t) => new Date(t).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
++function renderHome() {
+   const ul = $('run-list'); if (!ul) return; ul.textContent = '';
+   $('run-empty').hidden = !!R.list.length;
+-  let week = 0; const since = Date.now() - 7 * 864e5; for (const r of R.list) if (r.start >= since) week += r.dist;
+-  $('run-week').textContent = R.list.length ? `Last 7 days: ${fmtKm(week)} km · ${R.list.length} saved` : '';
++  renderGoals();
+   for (const r of R.list) {
+     const li = document.createElement('li'); li.className = 'run-item'; li.tabIndex = 0;
+-    li.innerHTML = `<span><b>${typeName(r.type)} · ${fmtKm(r.dist)} km</b><small>${when(r.start)}</small></span><span class="run-item-n">${fmtClock(r.moving)}<small>${fmtPace(r.pace)} /km · ↑${r.gain} m</small></span>`;
++    li.innerHTML = `<span><b>${esc(titleOf(r))}</b><small>${typeName(r.type)} · ${fmtKm(r.dist)} km${r.title ? ' · ' + when(r.start) : ''}${r.photos ? ` · ${r.photos} photo${r.photos > 1 ? 's' : ''}` : ''}</small></span><span class="run-item-n">${fmtClock(r.moving)}<small>${paceOrSpeed(r.type, r.pace)} ${paceUnit(r.type)} · ↑${r.gain} m</small></span>`;
+     li.onclick = () => openRun(r.id); ul.append(li);
+   }
+ }
++export function showPage(name) {   // home, detail, records, totals, settings
++  for (const p of ['home', 'detail', 'records', 'totals', 'settings']) { const el = $('run-' + p); if (el) el.hidden = p !== name; }
++  $('view-run').scrollTop = 0;
++}
+ async function openRun(id) {
+-  const run = await readJSON('run-' + id + '.json', null); if (!run) return;
+-  const a = analyse(run.pts, run.type); R.open = { run, a };
+-  $('run-home').hidden = true; $('run-detail').hidden = false; $('view-run').scrollTop = 0;
+-  $('run-d-title').textContent = `${typeName(run.type)} · ${when(run.start)}`;
+-  $('run-d-stats').innerHTML = stat('kilometres', fmtKm(a.dist)) + stat('moving time', fmtClock(a.moving)) + stat('average pace', fmtPace(a.pace), '/km') +
+-    stat('average speed', a.speed.toFixed(1), 'km/h') + stat('climbed', a.gain, 'm') + stat('descended', a.loss, 'm') +
+-    (a.best ? stat('fastest km', fmtPace(a.best), '') : '') + (a.alt ? stat('highest point', a.high, 'm') : '') + stat('total time', fmtClock(a.elapsed));
++  const run = await loadRun(id); if (!run) return;
++  const s = settings(), a = analyse(run.pts, run.type, s); R.open = { run, a };
++  showPage('detail');
++  $('run-d-title').textContent = titleOf(run);
++  $('run-d-name').value = run.title || ''; $('run-d-note').value = run.note || '';
++  const cyc = isCycle(run.type), sum = summaryOf(run, a);
++  $('run-d-stats').innerHTML = stat('kilometres', fmtKm(a.dist)) + stat('moving time', fmtClock(a.moving)) + stat(cyc ? 'average speed' : 'average pace', paceOrSpeed(run.type, a.pace), paceUnit(run.type)) +
++    stat(cyc ? 'average pace' : 'average speed', cyc ? fmtPace(a.pace) : a.speed.toFixed(1), cyc ? '/km' : 'km/h') + stat('top speed', a.maxSpeed.toFixed(1), 'km/h') + stat('climbed', a.gain, 'm') + stat('descended', a.loss, 'm') +
++    (a.best ? stat('fastest km', fmtPace(a.best), '') : '') + (a.alt ? stat('highest point', a.high, 'm') : '') + stat('calories (about)', sum.kcal, 'kcal') + stat('total time', fmtClock(a.elapsed));
++  const recs = run.records || [], bad = (run.badges || []).map((id) => BADGES.find((b) => b.id === id)).filter(Boolean);
++  $('run-d-awards').hidden = !recs.length && !bad.length;
++  $('run-d-awards').innerHTML = recs.map((r) => `<div class="run-award">🏅 New record: <b>${esc(r.label)}</b> ${esc(r.value)}</div>`).join('') + bad.map((b) => `<div class="run-award">${b.icon} New badge: <b>${esc(b.name)}</b></div>`).join('');
++  const ef = Object.entries(a.efforts); $('run-d-efforts').hidden = !ef.length;
++  $('run-d-efforts').innerHTML = ef.length ? '<h2>Best efforts</h2><div class="run-stats">' + ef.map(([D, t]) => stat(EFFORTS.find((e) => e[0] === +D)[1], fmtClock(t))).join('') + '</div>' : '';
+   const sp = $('run-d-splits');
+-  sp.innerHTML = a.splits.length ? '<table><thead><tr><th>km</th><th>Time</th><th>Pace /km</th><th>Climb</th></tr></thead><tbody>' + a.splits.map((s) =>
+-    `<tr${s.time === a.best ? ' class="best"' : ''}><td>${s.part ? s.km : s.km}</td><td>${fmtClock(s.time)}</td><td>${fmtPace(s.part ? s.time / (s.part / 1000) : s.time)}</td><td>${s.climb == null ? '' : (s.climb > 0 ? '+' : '') + s.climb + ' m'}</td></tr>`).join('') + '</tbody></table>'
+-    : '<p class="hint">Splits appear after the first kilometre.</p>';
++  sp.innerHTML = a.splits.length ? '<table><thead><tr><th>km</th><th>Time</th><th>' + (cyc ? 'Speed km/h' : 'Pace /km') + '</th><th>Climb</th></tr></thead><tbody>' + a.splits.map((x) => {
++    const per = x.part ? x.time / (x.part / 1000) : x.time;
++    return `<tr${x.time === a.best ? ' class="best"' : ''}><td>${x.km}</td><td>${fmtClock(x.time)}</td><td>${paceOrSpeed(run.type, per)}</td><td>${x.climb == null ? '' : (x.climb > 0 ? '+' : '') + x.climb + ' m'}</td></tr>`;
++  }).join('') + '</tbody></table>' : '<p class="hint">Splits appear after the first kilometre.</p>';
+   $('run-d-profile-box').hidden = !a.alt;
+-  requestAnimationFrame(() => { drawProfile(a); drawTraceInto($('run-d-trace'), a.clean); });
++  renderPhotos();
++  requestAnimationFrame(() => { drawProfile(a); drawSpeed(a, run.type); drawTrace($('run-d-trace'), a.clean, run.photos); });
+ }
+-function drawTraceInto(c, pts) { const keep = $('run-trace'); c.id = 'run-trace'; keep.id = 'run-trace-live'; drawTrace(pts); c.id = 'run-d-trace'; keep.id = 'run-trace'; }
+-function drawProfile(a) {
+-  const c = $('run-d-profile'); if (!a.alt || !c.clientWidth) return; const w = c.clientWidth, h = c.clientHeight, dpr = window.devicePixelRatio || 1;
++function chart(c, a, values, fmt, color) {   // a line chart along the distance
++  if (!c || !c.clientWidth) return; const w = c.clientWidth, h = c.clientHeight, dpr = window.devicePixelRatio || 1;
+   c.width = w * dpr; c.height = h * dpr; const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+-  const lo = a.low - 2, hi = Math.max(a.high + 2, lo + 10), L = 50, B = 18, T = 6, X = (d) => L + (d / (a.dist || 1)) * (w - L - 6), Y = (v) => T + (1 - (v - lo) / (hi - lo)) * (h - T - B);
+-  g.beginPath(); g.moveTo(X(0), h - B); a.alt.forEach((v, i) => v != null && g.lineTo(X(a.cum[i]), Y(v))); g.lineTo(X(a.dist), h - B); g.closePath(); g.fillStyle = 'rgba(217,119,87,.25)'; g.fill();
+-  g.beginPath(); a.alt.forEach((v, i) => v != null && (i ? g.lineTo(X(a.cum[i]), Y(v)) : g.moveTo(X(a.cum[i]), Y(v)))); g.strokeStyle = '#c15f3c'; g.lineWidth = 2; g.stroke();
+-  g.fillStyle = '#6b6860'; g.font = '11px system-ui, sans-serif'; g.textAlign = 'right'; g.textBaseline = 'middle'; g.fillText(Math.round(hi) + ' m', L - 4, Y(hi)); g.fillText(Math.round(lo) + ' m', L - 4, Y(lo));
++  const vs = values.filter((v) => v != null); if (vs.length < 2) return;
++  let lo = Math.min(...vs), hi = Math.max(...vs); if (hi - lo < 1e-6) { hi += 1; lo -= 1; } const pad = (hi - lo) * 0.08; lo -= pad; hi += pad;
++  const L = 50, B = 18, T = 6, X = (d) => L + (d / (a.dist || 1)) * (w - L - 6), Y = (v) => T + (1 - (v - lo) / (hi - lo)) * (h - T - B);
++  g.beginPath(); g.moveTo(X(0), h - B); values.forEach((v, i) => v != null && g.lineTo(X(a.cum[i]), Y(v))); g.lineTo(X(a.dist), h - B); g.closePath(); g.fillStyle = color + '40'; g.fill();
++  g.beginPath(); let on = false; values.forEach((v, i) => { if (v == null) { on = false; return; } if (on) g.lineTo(X(a.cum[i]), Y(v)); else g.moveTo(X(a.cum[i]), Y(v)); on = true; }); g.strokeStyle = color; g.lineWidth = 2; g.stroke();
++  g.fillStyle = '#6b6860'; g.font = '11px system-ui, sans-serif'; g.textAlign = 'right'; g.textBaseline = 'middle'; g.fillText(fmt(hi - pad), L - 4, Y(hi - pad)); g.fillText(fmt(lo + pad), L - 4, Y(lo + pad));
+   g.textAlign = 'center'; g.textBaseline = 'alphabetic'; g.fillText('0', X(0), h - 4); g.fillText(fmtKm(a.dist) + ' km', X(a.dist) - 20, h - 4);
+ }
+-function closeRun() { R.open = null; stop3d(); $('run-detail').hidden = true; $('run-home').hidden = false; }
++function drawProfile(a) { if (a.alt) chart($('run-d-profile'), a, a.alt, (v) => Math.round(v) + ' m', '#c15f3c'); }
++function drawSpeed(a, type) {   // speed in km/h, smoothed over about 10 seconds; only while moving
++  const v = a.spd.map((s, i) => (s == null || !a.mov[i] ? null : s * 3.6));
++  $('run-d-speed-box').hidden = v.filter((x) => x != null).length < 2; chart($('run-d-speed'), a, v, (x) => x.toFixed(1), '#2f6fde');
++  $('run-d-speed-title').textContent = isCycle(type) ? 'Speed (km/h)' : 'Speed (km/h)';
++}
++export function closeRun() { R.open = null; stop3d(); showPage('home'); }
+ async function deleteRun() {
+-  const o = R.open; if (!o || !confirm('Delete this ' + typeName(o.run.type).toLowerCase() + '? This cannot be undone.')) return;
++  const o = R.open; if (!o || !confirm('Delete this ' + typeName(o.run.type).toLowerCase() + ' and its photos? This cannot be undone.')) return;
+   try { await R.root.removeEntry('run-' + o.run.id + '.json'); } catch {}
+-  R.list = R.list.filter((r) => r.id !== o.run.id); await saveList(); renderList(); closeRun();
++  for (const p of o.run.photos || []) try { await R.root.removeEntry(p.name); } catch {}
++  R.list = R.list.filter((r) => r.id !== o.run.id); await saveList(); renderHome(); closeRun();
+ }
+-function showOnMap() {
++async function saveText() {   // title and notes
++  const o = R.open; if (!o) return; o.run.title = $('run-d-name').value.trim().slice(0, 80); o.run.note = $('run-d-note').value.slice(0, 2000);
++  await saveRun(o.run); const i = R.list.findIndex((r) => r.id === o.run.id); if (i >= 0) { R.list[i].title = o.run.title; await saveList(); }
++  $('run-d-title').textContent = titleOf(o.run); renderHome();
++}
++export function showOnMap() {
+   const o = R.open; if (!o) return; document.querySelector('.tabs [data-view=map]').click();
+-  const pts = o.a.clean.map((p) => [p[1], p[2]]);
+-  setTimeout(() => { window.internotMap?.api?.setTrack(pts); mapChip(true); }, 120);
++  const pts = o.a.clean.map(P);
++  setTimeout(() => { window.internotMap?.api?.setTrack(pts); mapChip(true, 'Hide route ✕'); }, 120);
++}
++async function memoryMap() {   // every saved activity on the offline map
++  const tracks = [];
++  for (const r of R.list) { const run = await loadRun(r.id); if (!run) continue; const a = analyse(run.pts, run.type, settings()), step = Math.max(1, Math.floor(a.clean.length / 400)); tracks.push(a.clean.filter((_, i) => i % step === 0 || i === a.clean.length - 1).map(P)); }
++  if (!tracks.length) { alert('No saved activities yet.'); return; }
++  document.querySelector('.tabs [data-view=map]').click();
++  setTimeout(() => { window.internotMap?.api?.setTracks(tracks); mapChip(true, `${tracks.length} route${tracks.length > 1 ? 's' : ''} · Hide ✕`); }, 120);
++  R.memory = tracks.length;
+ }
+-function mapChip(on) {
++export function mapChip(on, text) {
+   let chip = $('run-map-chip'); const wrap = $('map-wrap');
+   if (!on) { chip?.remove(); window.internotMap?.api?.setTrack(null); return; }
+-  if (!chip && wrap) { chip = document.createElement('button'); chip.id = 'run-map-chip'; chip.type = 'button'; chip.className = 'run-map-chip'; chip.textContent = 'Hide run route ✕'; chip.onclick = () => mapChip(false); wrap.append(chip); }
++  if (!chip && wrap) { chip = document.createElement('button'); chip.id = 'run-map-chip'; chip.type = 'button'; chip.className = 'run-map-chip'; chip.onclick = () => mapChip(false); wrap.append(chip); }
++  if (chip) chip.textContent = text || 'Hide route ✕';
+ }
+ 
+-/* ---------- 3D replay ---------- */
+-function scene(a) {   // metres east/north of the middle, height above the lowest point
+-  const P = a.clean; let la = 0, lo = 0; for (const p of P) { la += p[1]; lo += p[2]; } la /= P.length; lo /= P.length;
+-  const k = 111320 * Math.cos(la * RAD), M = 110540;
+-  const xy = P.map((p) => [(p[2] - lo) * k, (p[1] - la) * M]);
+-  let ext = 1; for (const [x, y] of xy) ext = Math.max(ext, Math.abs(x), Math.abs(y));
+-  const relief = a.alt ? Math.max(1, a.high - a.low) : 0, ex = relief ? Math.min(8, Math.max(1.5, (ext * 0.35) / relief)) : 1;
+-  const z = P.map((p, i) => (a.alt && a.alt[i] != null ? (a.alt[i] - a.low) * ex : 0));
+-  let roads = [];
+-  try {
+-    const pad = 0.25; let a0 = Infinity, b0 = Infinity, a1 = -Infinity, b1 = -Infinity; for (const p of P) { a0 = Math.min(a0, p[1]); a1 = Math.max(a1, p[1]); b0 = Math.min(b0, p[2]); b1 = Math.max(b1, p[2]); }
+-    const dl = (a1 - a0) * pad + 0.002, dn = (b1 - b0) * pad + 0.002;
+-    roads = (window.internotMap?.api?.roadsNear?.(a0 - dl, b0 - dn, a1 + dl, b1 + dn, 2500) || []).map((r) => ({ cls: r.cls, pts: r.pts.map(([y, x]) => [(x - lo) * k, (y - la) * M]) }));
+-  } catch {}
+-  return { xy, z, ext, ex, roads, a };
+-}
+-function render3d(g, w, h, S, frac, angle) {
+-  const { xy, z, ext, roads, a } = S, n = xy.length;
+-  const tilt = 0.62, cosA = Math.cos(angle), sinA = Math.sin(angle), cosT = Math.cos(tilt), sinT = Math.sin(tilt);
+-  const dist = ext * 2.9, f = Math.min(w, h) * 1.25;
+-  const proj = (x, y, zz) => {   // camera circles the route, looking down at it
+-    const rx = x * cosA - y * sinA, ry = x * sinA + y * cosA;   // turn
+-    const depth = ry * cosT - zz * sinT + dist, up = ry * sinT + zz * cosT;   // tilt
+-    const s = f / Math.max(depth, ext * 0.2); return [w / 2 + rx * s, h * 0.56 - up * s, depth];
+-  };
+-  const sky = g.createLinearGradient(0, 0, 0, h); sky.addColorStop(0, '#f6f3ea'); sky.addColorStop(1, '#e4ddcc'); g.fillStyle = sky; g.fillRect(0, 0, w, h);
+-  // ground: a square with a grid
+-  const G = ext * 1.25; g.lineWidth = 1; g.strokeStyle = 'rgba(120,110,90,.18)';
+-  const corners = [[-G, -G], [G, -G], [G, G], [-G, G]].map(([x, y]) => proj(x, y, 0));
+-  g.beginPath(); corners.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.closePath(); g.fillStyle = 'rgba(232,226,210,.9)'; g.fill();
+-  for (let i = -4; i <= 4; i++) { const t = (G * i) / 4; let p = proj(-G, t, 0), q = proj(G, t, 0); g.beginPath(); g.moveTo(p[0], p[1]); g.lineTo(q[0], q[1]); g.stroke(); p = proj(t, -G, 0); q = proj(t, G, 0); g.beginPath(); g.moveTo(p[0], p[1]); g.lineTo(q[0], q[1]); g.stroke(); }
+-  // roads from the offline map, flat on the ground
+-  g.lineJoin = g.lineCap = 'round';
+-  for (const r of roads) {
+-    g.beginPath(); let on = false;
+-    for (const [x, y] of r.pts) { if (Math.abs(x) > G || Math.abs(y) > G) { on = false; continue; } const [sx, sy] = proj(x, y, 0); if (on) g.lineTo(sx, sy); else g.moveTo(sx, sy); on = true; }
+-    g.strokeStyle = r.cls <= 3 ? 'rgba(217,119,87,.7)' : 'rgba(120,110,92,.7)'; g.lineWidth = r.cls <= 3 ? 2.6 : 1.6; g.stroke();
++/* ---------- photos on a saved activity ---------- */
++const urls = new Map();
++export async function photoURL(name) { if (urls.has(name)) return urls.get(name); const b = await readBlob(name); if (!b) return null; const u = URL.createObjectURL(b); urls.set(name, u); return u; }
++async function renderPhotos() {
++  const o = R.open, box = $('run-d-photos'); if (!o || !box) return; box.textContent = '';
++  for (const [i, p] of (o.run.photos || []).entries()) {
++    const u = await photoURL(p.name); if (!u) continue;
++    const b = document.createElement('button'); b.type = 'button'; b.className = 'run-thumb'; b.setAttribute('aria-label', 'Photo ' + (i + 1));
++    b.innerHTML = `<img alt="" src="${u}">`; b.onclick = () => viewPhoto(i); box.append(b);
++  }
++  $('run-d-photos-empty').hidden = !!(o.run.photos || []).length;
++}
++async function addPhotos(files) {   // from the gallery: placed where you were when the photo was taken, if it was during the activity
++  const o = R.open; if (!o || !files?.length) return; const pts = o.a.clean, t0 = pts[0]?.[0] ?? o.run.start, t1 = pts[pts.length - 1]?.[0] ?? t0;
++  for (const f of files) {
++    try {
++      const n = (o.run.photos || []).length, name = `run-photo-${o.run.id}-${n}-${Date.now() % 100000}.jpg`; await writeBlob(name, await shrinkPhoto(f));
++      const t = f.lastModified >= t0 - 300000 && f.lastModified <= t1 + 300000 ? f.lastModified : t1; let best = pts[pts.length - 1];
++      for (const p of pts) if (Math.abs(p[0] - t) < Math.abs(best[0] - t)) best = p;
++      (o.run.photos ||= []).push({ name, t, lat: best ? best[1] : null, lon: best ? best[2] : null });
++    } catch (e) { alert('Could not add the photo: ' + (e?.message || e)); }
+   }
+-  const P = xy.map(([x, y], i) => proj(x, y, z[i])), F = xy.map(([x, y]) => proj(x, y, 0)), cut = Math.max(1, Math.round(frac * (n - 1)));
+-  // shadow on the ground, then a see-through wall from the ground up to the route
+-  g.beginPath(); F.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.strokeStyle = 'rgba(60,50,40,.22)'; g.lineWidth = 3; g.stroke();
+-  for (let i = 1; i < n; i++) {
+-    const done = i <= cut; g.beginPath(); g.moveTo(F[i - 1][0], F[i - 1][1]); g.lineTo(P[i - 1][0], P[i - 1][1]); g.lineTo(P[i][0], P[i][1]); g.lineTo(F[i][0], F[i][1]); g.closePath();
+-    g.fillStyle = done ? 'rgba(217,119,87,.28)' : 'rgba(160,150,130,.12)'; g.fill();
++  o.run.photos.sort((x, y) => x.t - y.t); await saveRun(o.run);
++  const i = R.list.findIndex((r) => r.id === o.run.id); if (i >= 0) { R.list[i].photos = o.run.photos.length; await saveList(); }
++  renderPhotos(); renderHome(); drawTrace($('run-d-trace'), o.a.clean, o.run.photos);
++}
++async function viewPhoto(i) {
++  const o = R.open, p = o?.run.photos?.[i]; if (!p) return; R.photoIndex = i;
++  $('run-photo-img').src = await photoURL(p.name) || ''; $('run-photo-view').hidden = false;
++  $('run-photo-cap').textContent = `Photo ${i + 1} of ${o.run.photos.length} · ${new Date(p.t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}`;
++}
++async function deletePhoto() {
++  const o = R.open, i = R.photoIndex, p = o?.run.photos?.[i]; if (!p || !confirm('Delete this photo?')) return;
++  try { await R.root.removeEntry(p.name); } catch {} o.run.photos.splice(i, 1); await saveRun(o.run);
++  const k = R.list.findIndex((r) => r.id === o.run.id); if (k >= 0) { R.list[k].photos = o.run.photos.length; await saveList(); }
++  $('run-photo-view').hidden = true; renderPhotos(); renderHome(); drawTrace($('run-d-trace'), o.a.clean, o.run.photos);
++}
++
++/* ---------- a picture of the activity to share ---------- */
++async function shareImage() {
++  const o = R.open; if (!o) return; const W = 1080, H = 1350, c = document.createElement('canvas'); c.width = W; c.height = H; const g = c.getContext('2d');
++  g.fillStyle = '#f6f3ea'; g.fillRect(0, 0, W, H);
++  const pts = privatePts(o.a.clean);
++  if (pts.length > 1) {
++    const pr = projector(pts, W - 120, 700, 30), Q = pts.map(pr); g.save(); g.translate(60, 230);
++    g.lineJoin = g.lineCap = 'round'; g.beginPath(); Q.forEach(([x, y], i) => (i && pts[i][6] === pts[i - 1][6] ? g.lineTo(x, y) : g.moveTo(x, y))); g.strokeStyle = '#fff'; g.lineWidth = 18; g.stroke(); g.strokeStyle = '#d97757'; g.lineWidth = 10; g.stroke(); g.restore();
+   }
+-  g.beginPath(); P.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y))); g.strokeStyle = 'rgba(120,110,95,.55)'; g.lineWidth = 3; g.stroke();
+-  g.beginPath(); for (let i = 0; i <= cut; i++) (i ? g.lineTo(P[i][0], P[i][1]) : g.moveTo(P[i][0], P[i][1])); g.strokeStyle = '#ffffff'; g.lineWidth = 7; g.stroke(); g.strokeStyle = '#d97757'; g.lineWidth = 4.5; g.stroke();
+-  const pin = (p, col, r) => { g.beginPath(); g.arc(p[0], p[1], r, 0, 7); g.fillStyle = col; g.fill(); g.lineWidth = 2.5; g.strokeStyle = '#fff'; g.stroke(); };
+-  pin(P[0], '#3f9b4f', 6); if (frac >= 1) pin(P[n - 1], '#1f1e1d', 6);
+-  const me = P[cut]; g.beginPath(); g.moveTo(me[0], me[1]); g.lineTo(F[cut][0], F[cut][1]); g.strokeStyle = 'rgba(47,111,222,.5)'; g.lineWidth = 1.5; g.stroke(); pin(me, '#2f6fde', 8);
+-  // numbers at this moment of the run
+-  const d = a.cum[cut], t = a.tim[cut], el = a.alt ? a.alt[cut] : null;
+-  g.fillStyle = 'rgba(31,30,29,.82)'; const bw = Math.min(w - 24, 340); roundRect(g, 12, h - 74, bw, 62, 12); g.fill();
+-  g.fillStyle = '#fff'; g.textBaseline = 'alphabetic'; g.textAlign = 'left';
+-  const cols = [[fmtKm(d), 'km'], [fmtClock(t), 'time'], [fmtPace(d > 50 ? t / (d / 1000) : null), 'pace /km'], el != null ? [Math.round(el), 'm high'] : [S.a.gain, 'm climbed']];
+-  cols.forEach(([v, l], i) => { const x = 24 + (i * (bw - 24)) / 4; g.font = '600 19px system-ui, sans-serif'; g.fillText(String(v), x, h - 44); g.font = '11px system-ui, sans-serif'; g.fillStyle = 'rgba(255,255,255,.7)'; g.fillText(l, x, h - 26); g.fillStyle = '#fff'; });
+-  g.textAlign = 'right'; g.fillStyle = 'rgba(31,30,29,.7)'; g.font = '600 13px system-ui, sans-serif'; g.fillText('Internot AI', w - 14, 24); g.font = '11px system-ui, sans-serif';
+-  g.fillText(`${typeName(S.type)} · ${new Date(S.start).toLocaleDateString()}${S.ex > 1.05 ? ` · height ×${S.ex.toFixed(1)}` : ''}`, w - 14, 40);
+-}
+-function roundRect(g, x, y, w, h, r) { g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r); g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath(); }
+-const PLAY_MS = 14000;
+-function open3d() {
+-  const o = R.open; if (!o || o.a.n < 2) return;
+-  const S = scene(o.a); S.type = o.run.type; S.start = o.run.start; R.scene = S;
+-  $('run-3d').hidden = false; play3d();
+-}
+-function play3d(record) {
+-  stop3d(true); const c = $('run-3d-canvas'), S = R.scene; if (!S) return Promise.resolve();
+-  const w = record ? 720 : c.clientWidth, h = record ? 960 : c.clientHeight, dpr = record ? 1 : window.devicePixelRatio || 1;
+-  c.width = w * dpr; c.height = h * dpr; const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+-  const t0 = performance.now(), a0 = -0.6;
+-  return new Promise((done) => {
+-    const frame = (now) => {
+-      const p = Math.min(1, (now - t0) / PLAY_MS), ease = p < 1 ? p : 1;
+-      render3d(g, w, h, S, ease, a0 + ease * 1.6);
+-      if (p < 1 || now - t0 < PLAY_MS + 1500) R.anim = requestAnimationFrame(frame); else { R.anim = null; R.played = (R.played || 0) + 1; done(); }
+-    };
+-    R.anim = requestAnimationFrame(frame); R.animDone = done;
+-  });
+-}
+-function stop3d(keepOpen) { if (R.anim) cancelAnimationFrame(R.anim); R.anim = null; R.animDone?.(); R.animDone = null; if (!keepOpen) $('run-3d') && ($('run-3d').hidden = true); }
+-async function saveVideo() {
+-  const c = $('run-3d-canvas'), btn = $('run-3d-video'), note = $('run-3d-note');
+-  if (!c.captureStream || !window.MediaRecorder) { note.textContent = 'This phone cannot make videos here. Use the phone\'s screen recorder while the replay plays.'; return; }
+-  const type = ['video/mp4;codecs=avc1', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t));
+-  if (!type) { note.textContent = 'This phone cannot make videos here. Use the phone\'s screen recorder while the replay plays.'; return; }
+-  btn.disabled = true; note.textContent = 'Making the video… keep this screen open (about 16 seconds).';
+-  const stream = c.captureStream(30), rec = new MediaRecorder(stream, { mimeType: type, videoBitsPerSecond: 2500000 }), parts = [];
+-  rec.ondataavailable = (e) => e.data.size && parts.push(e.data);
+-  const stopped = new Promise((r) => (rec.onstop = r)); rec.start(500);
+-  await play3d(true); rec.stop(); await stopped; stream.getTracks().forEach((t) => t.stop());
+-  const blob = new Blob(parts, { type: type.split(';')[0] }), ext = type.startsWith('video/mp4') ? 'mp4' : 'webm';
+-  const name = `internot-${R.open?.run.type || 'run'}-${new Date(R.scene.start).toISOString().slice(0, 10)}.${ext}`;
+-  R.lastVideo = { bytes: blob.size, type: blob.type, name };
+-  try {
+-    if (RUN) {
+-      const data = await new Promise((ok, bad) => { const fr = new FileReader(); fr.onload = () => ok(String(fr.result).split(',')[1]); fr.onerror = bad; fr.readAsDataURL(blob); });
+-      await RUN.shareVideo({ data, name, type: blob.type }); note.textContent = `Video ready (${(blob.size / 1048576).toFixed(1)} MB). Choose where to save or send it.`;
+-    } else {
+-      const u = URL.createObjectURL(blob), l = document.createElement('a'); l.href = u; l.download = name; document.body.append(l); l.click(); l.remove(); setTimeout(() => URL.revokeObjectURL(u), 30000);
+-      note.textContent = `Video saved (${(blob.size / 1048576).toFixed(1)} MB).`;
+-    }
+-  } catch (e) { note.textContent = 'Could not save the video: ' + (e?.message || e); }
+-  btn.disabled = false; play3d();
++  g.fillStyle = '#1f1e1d'; g.font = '600 52px system-ui, sans-serif'; g.fillText(titleOf(o.run).slice(0, 34), 60, 110);
++  g.fillStyle = '#6b6860'; g.font = '32px system-ui, sans-serif'; g.fillText(`${typeName(o.run.type)} · ${new Date(o.run.start).toLocaleDateString()}`, 60, 165);
++  const a = o.a, cols = [[fmtKm(a.dist), 'km'], [fmtClock(a.moving), 'time'], [paceOrSpeed(o.run.type, a.pace), paceUnit(o.run.type)], [String(a.gain), 'm climbed']];
++  cols.forEach(([v, l], i) => { const x = 60 + i * 250; g.fillStyle = '#1f1e1d'; g.font = '600 60px system-ui, sans-serif'; g.fillText(v, x, 1050); g.fillStyle = '#6b6860'; g.font = '30px system-ui, sans-serif'; g.fillText(l, x, 1095); });
++  g.fillStyle = '#c15f3c'; g.font = '600 34px system-ui, sans-serif'; g.fillText('Internot AI', 60, H - 80); g.fillStyle = '#6b6860'; g.font = '26px system-ui, sans-serif'; g.fillText('Recorded offline · © OpenStreetMap contributors', 60, H - 40);
++  const blob = await new Promise((ok) => c.toBlob(ok, 'image/png')); R.lastImage = { bytes: blob.size };
++  try { await shareFile(blob, `internot-${o.run.type}-${new Date(o.run.start).toISOString().slice(0, 10)}.png`, 'Share your activity'); } catch (e) { alert('Could not share: ' + (e?.message || e)); }
++}
++
++/* ---------- settings screen ---------- */
++function bmiText(w, h) { if (!w || !h) return ''; const b = w / (h / 100) ** 2; const cat = b < 18.5 ? 'underweight' : b < 25 ? 'healthy weight' : b < 30 ? 'overweight' : 'obese'; return `BMI ${b.toFixed(1)} · ${cat} (adult range)`; }
++function renderSettings() {
++  const s = settings();
++  $('run-s-weight').value = s.weight || ''; $('run-s-height').value = s.height || ''; $('run-s-bmi').textContent = bmiText(+s.weight, +s.height);
++  $('run-s-voice').checked = !!s.voice; $('run-s-every').value = String(s.every); $('run-s-auto').checked = !!s.autoPause;
++  $('run-s-week').value = s.weekGoal || ''; $('run-s-month').value = s.monthGoal || '';
++  $('run-s-zone').textContent = s.privacy ? `On: within ${s.privacy.r} m of the place you set, the route is left out of shared videos and pictures.` : 'Off.';
++  $('run-s-zone-r').value = String(s.privacy?.r || 300); $('run-s-zone-clear').hidden = !s.privacy;
++}
++function saveSettingsForm() {
++  const num = (id) => { const v = parseFloat($(id).value); return isFinite(v) && v > 0 ? v : 0; };
++  saveSettings({ weight: num('run-s-weight') || DEFAULTS.weight, height: num('run-s-height') || DEFAULTS.height, voice: $('run-s-voice').checked, every: $('run-s-every').value,
++    autoPause: $('run-s-auto').checked, weekGoal: num('run-s-week'), monthGoal: num('run-s-month') });
++  renderSettings(); renderGoals();
++}
++async function setZone(fromLast) {
++  const r = +$('run-s-zone-r').value || 300;
++  if (fromLast) { const first = R.list[R.list.length ? 0 : -1]; const run = first && await loadRun(first.id); const p = run?.pts?.[0]; if (!p) { alert('No saved activity yet.'); return; } saveSettings({ privacy: { lat: p[1], lon: p[2], r } }); renderSettings(); return; }
++  if (!navigator.geolocation) { alert('No GPS here.'); return; }
++  $('run-s-zone').textContent = 'Finding where you are…';
++  navigator.geolocation.getCurrentPosition((pos) => { saveSettings({ privacy: { lat: pos.coords.latitude, lon: pos.coords.longitude, r } }); renderSettings(); },
++    () => { $('run-s-zone').textContent = 'Could not find where you are. Go outside, or use the start of your last activity.'; }, { enableHighAccuracy: true, timeout: 30000 });
+ }
+ 
+ /* ---------- start ---------- */
++function pickType(t) { R.type = t; for (const k of Object.keys(TYPES)) $('run-type-' + k)?.classList.toggle('on', k === t); renderLive(); }
+ export async function initRun(root) {
+   R.root = root;
+   R.list = await readJSON('runs.json', []);
+-  $('run-type-run').onclick = () => { R.type = 'run'; $('run-type-run').classList.add('on'); $('run-type-walk').classList.remove('on'); };
+-  $('run-type-walk').onclick = () => { R.type = 'walk'; $('run-type-walk').classList.add('on'); $('run-type-run').classList.remove('on'); };
++  for (const k of Object.keys(TYPES)) { const b = $('run-type-' + k); if (b) b.onclick = () => pickType(k); }
+   $('run-start').onclick = start; $('run-pause').onclick = pause;
++  $('run-photo-file').onchange = (e) => { takePhoto([...e.target.files]); e.target.value = ''; };
+   $('run-finish').onclick = () => { if (confirm('Finish and save this ' + typeName(R.live?.type).toLowerCase() + '?')) finish(); };
+-  $('run-d-back').onclick = closeRun; $('run-d-delete').onclick = deleteRun; $('run-d-map').onclick = showOnMap; $('run-d-3d').onclick = open3d;
+-  $('run-3d-close').onclick = () => stop3d(); $('run-3d-play').onclick = () => play3d(); $('run-3d-video').onclick = saveVideo;
+-  document.querySelector('.tabs [data-view=run]')?.addEventListener('click', () => requestAnimationFrame(() => { renderLive(); if (R.open) { drawProfile(R.open.a); drawTraceInto($('run-d-trace'), R.open.a.clean); } }));
++  $('run-d-back').onclick = closeRun; $('run-d-delete').onclick = deleteRun; $('run-d-map').onclick = showOnMap; $('run-d-3d').onclick = () => open3d();
++  $('run-d-share').onclick = shareImage; $('run-d-name').onchange = saveText; $('run-d-note').onchange = saveText;
++  $('run-d-addphoto').onchange = (e) => { addPhotos([...e.target.files]); e.target.value = ''; };
++  $('run-photo-close').onclick = () => { $('run-photo-view').hidden = true; }; $('run-photo-delete').onclick = deletePhoto;
++  $('run-go-records').onclick = () => { renderRecords(); showPage('records'); }; $('run-go-totals').onclick = () => { showPage('totals'); renderTotals(); };
++  $('run-go-memory').onclick = memoryMap; $('run-go-settings').onclick = () => { renderSettings(); showPage('settings'); };
++  for (const id of ['run-r-back', 'run-t-back', 'run-s-back']) $(id).onclick = () => showPage('home');
++  for (const id of ['run-s-weight', 'run-s-height', 'run-s-voice', 'run-s-every', 'run-s-auto', 'run-s-week', 'run-s-month']) $(id).onchange = saveSettingsForm;
++  $('run-s-zone-here').onclick = () => setZone(false); $('run-s-zone-last').onclick = () => setZone(true);
++  $('run-s-zone-clear').onclick = () => { saveSettings({ privacy: null }); renderSettings(); };
++  $('run-s-zone-r').onchange = () => { const s = settings(); if (s.privacy) { saveSettings({ privacy: { ...s.privacy, r: +$('run-s-zone-r').value } }); renderSettings(); } };
++  initExtra(); initVideo();
++  document.querySelector('.tabs [data-view=run]')?.addEventListener('click', () => requestAnimationFrame(() => { renderLive(); if (R.open) { drawProfile(R.open.a); drawSpeed(R.open.a, R.open.run.type); drawTrace($('run-d-trace'), R.open.a.clean, R.open.run.photos); } }));
+   document.addEventListener('visibilitychange', () => { if (!document.hidden && R.live) pull(); });
+-  renderLive(); renderList(); await recover();
+-  window.internotRun = { R, analyse, start, pause, finish, openRun, open3d, play3d, saveVideo, showOnMap, mapChip, closeRun };
++  renderLive(); renderHome(); await recover();
++  window.internotRun = { R, analyse, kcal, settings, saveSettings, start, pause, finish, openRun, open3d, play3d, saveVideo, showOnMap, mapChip, closeRun, memoryMap, shareImage, addPhotos, takePhoto, privatePts, bestsOf, newRecords, earnedBadges, renderRecords, renderTotals, showPage, pickType };
+ }
+diff --git a/internot-ai-v0.4/style.css b/internot-ai-v0.4/style.css
+index d425a1e..009825e 100644
+--- a/internot-ai-v0.4/style.css
++++ b/internot-ai-v0.4/style.css
+@@ -195,7 +195,26 @@ button.danger { color: var(--danger); }
+ .run-splits th { color: var(--muted); font-weight: 500; font-size: 12px; }
+ .run-splits tr.best td { color: var(--accent-deep); font-weight: 600; }
+ .run-3d { position: fixed; inset: 0; z-index: 40; background: var(--bg); display: flex; flex-direction: column; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+-.run-3d canvas { flex: 1; min-height: 0; width: 100%; }
++.run-3d canvas { flex: 1; min-height: 0; width: 100%; height: 100%; object-fit: contain; }
+ .run-3d-bar { display: flex; gap: 8px; padding: 10px 12px 0; } .run-3d-bar button { flex: 1; }
+ .run-3d .hint { padding: 0 12px 10px; min-height: 1.5em; }
+ .run-map-chip { position: absolute; left: 50%; transform: translateX(-50%); bottom: 18px; z-index: 5; border-radius: 20px; box-shadow: 0 2px 8px rgba(0,0,0,.18); background: var(--panel); }
++.run-field { display: inline-flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); margin: 0 10px 10px 0; }
++.run-field.wide { display: flex; margin-right: 0; }
++.run-field select, .run-field input, .run-field textarea { font-size: 16px; }
++.run-check { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
++.run-goal { margin: 10px 0; } .run-goal-top { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 4px; }
++.run-goalbar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; } .run-goalbar i { display: block; height: 100%; width: 0; background: var(--accent-deep); }
++.run-links { margin: 8px 0; } .run-links button { flex: 1 1 40%; }
++.run-awards { margin: 8px 0; } .run-award { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; margin-bottom: 6px; }
++.run-photos { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
++.run-thumb { padding: 0; border-radius: 10px; overflow: hidden; flex: 0 0 auto; } .run-thumb img { display: block; width: 96px; height: 96px; object-fit: cover; }
++.run-badges { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
++.run-badge { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px; opacity: .55; }
++.run-badge.got { opacity: 1; border-color: var(--accent-deep); }
++.run-badge-i { font-size: 24px; display: block; } .run-badge b { display: block; font-size: 14px; } .run-badge small { display: block; font-size: 12px; color: var(--muted); }
++.run-bars { height: 170px; margin-top: 10px; }
++.linklike { background: none; border: 0; padding: 0; color: var(--accent-deep); text-decoration: underline; font: inherit; min-height: 0; }
++.run-3d-opts { display: flex; gap: 6px; padding: 8px 12px 0; flex-wrap: wrap; } .run-3d-opts select { flex: 1 1 22%; min-width: 0; }
++#run-photo-view img { flex: 1; min-height: 0; width: 100%; object-fit: contain; background: #000; }
++#run-photo-view .hint { padding: 6px 12px 0; }
+diff --git a/internot-ai-v0.4/sw.js b/internot-ai-v0.4/sw.js
+index 2737f02..9a5f2b5 100644
+--- a/internot-ai-v0.4/sw.js
++++ b/internot-ai-v0.4/sw.js
+@@ -1,7 +1,7 @@
+ // Internot AI service worker: makes the app open with no internet at all,
+ // and adds the two headers browsers need before they allow multi-threaded (fast) inference.
+-const VERSION = 'internot-v0.10.0';
+-const SHELL = ['./', './index.html', './style.css', './app.js', './maps.js', './mesh.js', './packs.js', './online.js', './run.js', './osmpbf.js', './map-worker.js', './lib/qrcode.js', './lib/jsqr.js', './world.json', './icon.svg', './icon-192.png', './icon-512.png', './manifest.webmanifest',
++const VERSION = 'internot-v0.11.0';
++const SHELL = ['./', './index.html', './style.css', './app.js', './maps.js', './mesh.js', './packs.js', './online.js', './run.js', './run-extra.js', './run-video.js', './osmpbf.js', './map-worker.js', './lib/qrcode.js', './lib/jsqr.js', './world.json', './icon.svg', './icon-192.png', './icon-512.png', './manifest.webmanifest',
+   './lib/wllama/index.js', './lib/wllama/wllama.wasm'];
+ 
+ self.addEventListener('install', (e) => {
