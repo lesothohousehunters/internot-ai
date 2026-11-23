@@ -35,7 +35,8 @@ P
 }
 feed &
 # The run video opens the share menu: close it again
-( for i in $(seq 1 2400); do adb logcat -d 2>/dev/null | grep -q "INTERNOT-TEST run-back" && { adb shell input keyevent KEYCODE_BACK < /dev/null; break; }; sleep 2; done ) &
+( for i in $(seq 1 2400); do adb logcat -d 2>/dev/null | grep -q "INTERNOT-TEST run-back " && { adb shell input keyevent KEYCODE_BACK < /dev/null; break; }; sleep 2; done ) &
+( for i in $(seq 1 2600); do adb logcat -d 2>/dev/null | grep -q "INTERNOT-TEST run-back2" && { adb shell input keyevent KEYCODE_BACK < /dev/null; break; }; sleep 2; done ) &
 
 seen=0
 for i in $(seq 1 3200); do

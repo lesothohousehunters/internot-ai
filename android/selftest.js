@@ -12,7 +12,7 @@
     log('env', { ua: navigator.userAgent, isolated: self.crossOriginIsolated, webSpeech: 'speechSynthesis' in window, cores: navigator.hardwareConcurrency, memory: navigator.deviceMemory, jspi: 'Suspending' in WebAssembly, core: !!window.capacitorExports, plugins: (window.Capacitor?.PluginHeaders || []).map((h) => h.name) });
     await shot('first-launch');
     // the anonymous-count question, asked once on first launch
-    for (let i = 0; i < 40 && document.getElementById('consent')?.hidden !== false; i++) await wait(500);
+    for (let i = 0; i < 240 && document.getElementById('consent')?.hidden !== false; i++) await wait(500);
     log('consent', { shown: document.getElementById('consent')?.hidden === false, text: (document.querySelector('#consent b') || {}).textContent });
     await shot('consent');
     document.getElementById('consent-no')?.click(); await wait(500);
@@ -54,23 +54,41 @@
     }
     { const l = internotMap.api.builtIns()[0]; if (l) await internotMap.api.switchBuiltIn(l); }
     // Run and walk: the test script feeds GPS positions once it sees run-start, and turns the screen off for a while
-    { window.confirm = () => true; const RR = window.internotRun; tab('run'); await wait(800); await shot('run-home');
-      document.getElementById('run-type-run').click(); document.getElementById('run-start').click(); await wait(2000);
+    { window.confirm = () => true; window.alert = () => {}; const RR = window.internotRun; tab('run'); await wait(800);
+      RR.saveSettings({ weight: 68, height: 175, voice: true, every: '500', autoPause: true, weekGoal: 10, monthGoal: 40 });
+      RR.pickType('run'); document.getElementById('run-goal').value = 'd3'; await shot('run-home');
+      document.getElementById('run-start').click(); await wait(2000);
       log('run-start', { live: !!RR.R.live, gps: document.getElementById('run-gps').textContent });
-      let last = -1, still = 0;
-      for (let i = 0; i < 260; i++) { await wait(2000); const n = RR.R.live ? RR.R.live.pts.length : -1; if (i === 30) await shot('run-recording');
+      let last = -1, still = 0, said = new Set();
+      for (let i = 0; i < 300; i++) { await wait(2000); const n = RR.R.live ? RR.R.live.pts.length : -1; if (RR.R.live?.said) said.add(RR.R.live.said); if (i === 30) await shot('run-recording');
         if (i === 45 && RR.R.live) { RR.pause(); await wait(6000); RR.pause(); log('run-paused-resumed', { state: RR.R.live.state, seg: RR.R.live.seg }); }
         if (n === last) still++; else still = 0; last = n; if (n > 150 && still >= 6) break; }
-      const L = RR.R.live; const a = L ? RR.analyse(L.pts, L.type) : null;
-      log('run-recorded', { pts: L && L.pts.length, segments: L && [...new Set(L.pts.map((p) => p[6]))], gapDuringScreenOff: L && Math.max(...L.pts.slice(1).map((p, i) => p[0] - L.pts[i][0])) / 1000, km: a && +(a.dist / 1000).toFixed(3), moving: a && Math.round(a.moving), pace: a && Math.round(a.pace), gain: a && a.gain, stats: document.getElementById('run-live-stats').innerText.replace(/\n/g, ' ') });
+      const L = RR.R.live; const a = L ? RR.analyse(L.pts, L.type, RR.settings()) : null;
+      log('run-recorded', { pts: L && L.pts.length, segments: L && [...new Set(L.pts.map((p) => p[6]))], gapDuringScreenOff: L && Math.max(...L.pts.slice(1).map((p, i) => p[0] - L.pts[i][0])) / 1000, km: a && +(a.dist / 1000).toFixed(3), moving: a && Math.round(a.moving), elapsed: a && Math.round(a.elapsed), pace: a && Math.round(a.pace), gain: a && a.gain, kcal: a && RR.kcal(a, 'run', 68), stats: document.getElementById('run-live-stats').innerText.replace(/\n/g, ' '), goal: document.getElementById('run-goalbar-text').textContent });
+      log('run-voice', { said: [...said] });
       await RR.finish(); await wait(1500);
-      log('run-saved', { list: RR.R.list, title: document.getElementById('run-d-title').textContent, stats: document.getElementById('run-d-stats').innerText.replace(/\n/g, ' '), splits: document.getElementById('run-d-splits').innerText.replace(/\n/g, ' ').slice(0, 300) });
+      log('run-saved', { list: RR.R.list, title: document.getElementById('run-d-title').textContent, awards: document.getElementById('run-d-awards').innerText.replace(/\n/g, ' | '), stats: document.getElementById('run-d-stats').innerText.replace(/\n/g, ' '), efforts: document.getElementById('run-d-efforts').innerText.replace(/\n/g, ' '), splits: document.getElementById('run-d-splits').innerText.replace(/\n/g, ' ').slice(0, 300) });
       await shot('run-detail');
+      // a photo added from the gallery (made here, as the emulator has no camera pictures)
+      { const c = document.createElement('canvas'); c.width = 800; c.height = 600; const g = c.getContext('2d'); g.fillStyle = '#c15f3c'; g.fillRect(0, 0, 800, 600); g.fillStyle = '#fff'; g.font = '80px sans-serif'; g.fillText('Maseru', 200, 320);
+        const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.9)); await RR.addPhotos([new File([blob], 'p.jpg', { type: 'image/jpeg', lastModified: RR.R.open.a.clean[Math.floor(RR.R.open.a.clean.length / 2)][0] })]); await wait(1000);
+        log('run-photo', { photos: RR.R.open.run.photos.length, list: RR.R.list[0].photos, thumbs: document.querySelectorAll('#run-d-photos img').length }); }
+      { const n = document.getElementById('run-d-name'); n.value = 'Test run through Maseru'; n.dispatchEvent(new Event('change')); await wait(500); log('run-title', { title: document.getElementById('run-d-title').textContent, saved: RR.R.list[0].title }); }
       RR.showOnMap(); await wait(3000); log('run-map', { track: internotMap.track && internotMap.track.length, z: internotMap.view.z, chip: !!document.getElementById('run-map-chip') }); await shot('run-on-map'); RR.mapChip(false);
-      tab('run'); await wait(500); RR.open3d(); await wait(8000); log('run-3d', { roads: RR.R.scene && RR.R.scene.roads.length, height: RR.R.scene && RR.R.scene.ex }); await shot('run-3d');
-      const v = RR.saveVideo(); for (let i = 0; i < 60 && !RR.R.lastVideo; i++) await wait(1000); await wait(4000);
+      tab('run'); await wait(500);
+      RR.saveSettings({ video: { shape: 'tall', style: 'orange', ground: 'satellite', length: 15 } });
+      await RR.open3d(); await wait(5000); log('run-3d', { roads: RR.R.scene && RR.R.scene.roads.length, height: RR.R.scene && RR.R.scene.ex, info: RR.R.videoInfo, note: document.getElementById('run-3d-note').textContent }); await shot('run-3d');
+      await wait(3500); await shot('run-3d-photo');
+      const v = RR.saveVideo(); for (let i = 0; i < 90 && !RR.R.lastVideo; i++) await wait(1000); await wait(4000);
       log('run-video', { video: RR.R.lastVideo || null, note: document.getElementById('run-3d-note').textContent }); await shot('run-video-share');
-      log('run-back', 1); await wait(3000); await v.catch(() => {}); document.getElementById('run-3d-close').click(); RR.closeRun(); }
+      log('run-back', 1); await wait(3000); await v.catch(() => {}); document.getElementById('run-3d-close').click();
+      RR.shareImage(); for (let i = 0; i < 20 && !RR.R.lastImage; i++) await wait(500); await wait(3000); log('run-picture', RR.R.lastImage || null); await shot('run-picture-share');
+      log('run-back2', 1); await wait(3000);
+      RR.closeRun(); document.getElementById('run-go-records').click(); await wait(600); log('run-records', { text: document.getElementById('run-r-body').innerText.replace(/\n/g, ' | ').slice(0, 700) }); await shot('run-records');
+      RR.showPage('home'); document.getElementById('run-go-totals').click(); await wait(800); log('run-totals', { text: document.getElementById('run-t-body').innerText.replace(/\n/g, ' '), goals: document.getElementById('run-goals').innerText.replace(/\n/g, ' ') }); await shot('run-totals');
+      RR.showPage('home'); document.getElementById('run-go-settings').click(); await wait(500); log('run-settings', { bmi: document.getElementById('run-s-bmi').textContent }); await shot('run-settings');
+      RR.showPage('home'); await RR.memoryMap(); await wait(3000); log('run-memory', { routes: RR.R.memory, tracks: internotMap.tracks && internotMap.tracks.length }); await shot('run-memory-map'); RR.mapChip(false);
+      tab('run'); RR.showPage('home'); }
     // a location pasted from WhatsApp
     const box = document.getElementById('map-search'); box.value = 'https://maps.google.com/maps?q=-29.31678%2C27.48226&z=17&hl=en'; box.dispatchEvent(new Event('input'));
     await wait(400); document.querySelector('#map-results li')?.click(); await wait(1500);

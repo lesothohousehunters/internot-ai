@@ -412,7 +412,7 @@ function paint() {
     ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 9; ctx.stroke(); ctx.strokeStyle = '#2f6fde'; ctx.lineWidth = 5.5; ctx.stroke();
   }
   if (M.track) {   // a recorded run or walk (Run tab)
-    const t = M.track; ctx.beginPath(); t.forEach((p, i) => { const sx = p.x / u + ox, sy = p.y / u + oy; if (i) ctx.lineTo(sx, sy); else ctx.moveTo(sx, sy); });
+    ctx.beginPath(); for (const t of M.tracks) t.forEach((p, i) => { const sx = p.x / u + ox, sy = p.y / u + oy; if (i) ctx.lineTo(sx, sy); else ctx.moveTo(sx, sy); });
     ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 8; ctx.stroke(); ctx.strokeStyle = '#d97757'; ctx.lineWidth = 4.5; ctx.stroke();
   }
   ctx.setTransform(M.dpr, 0, 0, M.dpr, 0, 0);   // names and markers stay upright when the map is turned
@@ -447,7 +447,7 @@ function paint() {
   if (M.start) dot(M.start, '#ffffff', '#1f1e1d', 7);
   if (M.pick && !M.route) dot(M.pick, '#c15f3c', '#ffffff', 8);
   if (M.dest) dot(M.dest, '#1f1e1d', '#ffffff', 9);
-  if (M.track) { dot(M.track[0], '#3f9b4f', '#ffffff', 7); dot(M.track[M.track.length - 1], '#1f1e1d', '#ffffff', 7); }
+  if (M.track && M.tracks.length === 1) { dot(M.track[0], '#3f9b4f', '#ffffff', 7); dot(M.track[M.track.length - 1], '#1f1e1d', '#ffffff', 7); }
   const nb = $('map-north'); if (nb) { nb.hidden = !rot; nb.firstChild && (nb.firstChild.style.transform = `rotate(${rot}rad)`); }
   if (M.gps) {
     const [sx, sy] = toS(M.gps.x, M.gps.y); const rad = Math.min(200, (M.gps.acc || 0) / mPerUnit(M.gps.y) / u);
@@ -787,10 +787,12 @@ export async function initMaps(root) {
   renderMapInfo();
 }
 // Run tab: show a recorded run on the map (null hides it), and the roads around it for the 3D replay.
-function setTrack(pts) {
-  M.track = pts && pts.length > 1 ? pts.map(([lat, lon]) => ({ x: lonToX(lon), y: latToY(lat) })) : null;
+function setTrack(pts) { setTracks(pts && pts.length > 1 ? [pts] : null); }
+function setTracks(list) {   // several routes at once (the Run tab's memory map)
+  M.tracks = (list || []).filter((t) => t && t.length > 1).map((t) => t.map(([lat, lon]) => ({ x: lonToX(lon), y: latToY(lat) })));
+  M.track = M.tracks.length ? M.tracks[0] : null;
   if (M.track && M.w) {
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const p of M.track) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; for (const t of M.tracks) for (const p of t) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
     const span = Math.max((x1 - x0) / (M.w * 0.75), (y1 - y0) / (M.h * 0.7), 1);
     M.view.cx = (x0 + x1) / 2; M.view.cy = (y0 + y1) / 2; M.view.rot = 0; M.view.z = Math.max(3, Math.min(18, Math.log2(TWO32 / (256 * span)))); M.needFit = false;
   }
@@ -807,6 +809,6 @@ function roadsNear(lat0, lon0, lat1, lon1, max = 4000) {
   });
   return out;
 }
-M.api = { setTrack, roadsNear, parseLocation, setSat, SAT, makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint, switchBuiltIn, builtIns: () => BUILT_INS, current: () => M.builtIn, addMaps, removeMap: (file) => { BUILT_INS = BUILT_INS.filter((b) => b.file !== file); renderMapInfo(); } };
+M.api = { setTrack, setTracks, speak, satTile, satLocalBox: () => SAT.local, roadsNear, parseLocation, setSat, SAT, makeRoute, nearestNode, pickAt, directions, startNav, endNav, paint, switchBuiltIn, builtIns: () => BUILT_INS, current: () => M.builtIn, addMaps, removeMap: (file) => { BUILT_INS = BUILT_INS.filter((b) => b.file !== file); renderMapInfo(); } };
 M.api.speakTest = async (text) => { if (!TTS) return { native: false, web: 'speechSynthesis' in window }; const l = await TTS.getSupportedLanguages().catch((e) => ({ error: String(e) })); const said = await Promise.race([TTS.speak({ text, lang: 'en-US' }).then(() => 'spoken', (e) => 'failed: ' + (e?.message || e)), new Promise((r) => setTimeout(() => r('timeout'), 9000))]); return { native: true, languages: l.languages ? l.languages.length : l, said }; };
 export const mapShown = () => resize();

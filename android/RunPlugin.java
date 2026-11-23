@@ -24,6 +24,7 @@ import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.List;
 import org.json.JSONArray;
+import org.json.JSONObject;
 
 /** Run tab: GPS recording that keeps going with the screen off, and saving a replay video. */
 @CapacitorPlugin(name = "Run", permissions = {
@@ -53,6 +54,7 @@ public class RunPlugin extends Plugin {
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(getContext(), "android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             try { ActivityCompat.requestPermissions(getActivity(), new String[] { "android.permission.POST_NOTIFICATIONS" }, 4107); } catch (Exception ignored) { }
         }
+        try { JSObject c = call.getObject("coach", null); RunService.coach = c == null ? null : new JSONObject(c.toString()); } catch (Exception e) { RunService.coach = null; }
         if (!RunService.running) {
             RunService.prepare(getContext(), call.getBoolean("keep", false));
             ContextCompat.startForegroundService(getContext(), new Intent(getContext(), RunService.class));
@@ -62,11 +64,11 @@ public class RunPlugin extends Plugin {
     }
 
     @PluginMethod
-    public void pause(PluginCall call) { RunService.paused = true; call.resolve(state()); }
+    public void pause(PluginCall call) { RunService.paused = true; RunService i = RunService.instance; if (i != null) i.sayPause(true); call.resolve(state()); }
 
     @PluginMethod
     public void resume(PluginCall call) {
-        if (RunService.paused) { RunService.segment++; RunService.paused = false; }
+        if (RunService.paused) { RunService.segment++; RunService.paused = false; RunService i = RunService.instance; if (i != null) i.sayPause(false); }
         call.resolve(state());
     }
 
@@ -87,6 +89,10 @@ public class RunPlugin extends Plugin {
     @PluginMethod
     public void status(PluginCall call) { call.resolve(state()); }
 
+    /** Speak a line through the recorder's voice (used for the finish and for new records). */
+    @PluginMethod
+    public void say(PluginCall call) { RunService i = RunService.instance; if (i != null) i.say(call.getString("text", "")); call.resolve(); }
+
     private JSObject state() {
         JSObject o = new JSObject();
         o.put("running", RunService.running);
@@ -96,6 +102,7 @@ public class RunPlugin extends Plugin {
         o.put("lastFix", RunService.lastFix);
         o.put("accuracy", RunService.lastAccuracy);
         o.put("error", RunService.error);
+        o.put("said", RunService.lastSaid);
         return o;
     }
 
@@ -133,7 +140,7 @@ public class RunPlugin extends Plugin {
             send.setType(call.getString("type", "video/webm"));
             send.putExtra(Intent.EXTRA_STREAM, uri);
             send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            Intent chooser = Intent.createChooser(send, "Share your run video");
+            Intent chooser = Intent.createChooser(send, call.getString("title", "Share your run video"));
             chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             getContext().startActivity(chooser);
             JSObject o = new JSObject(); o.put("path", f.getAbsolutePath()); o.put("bytes", f.length());

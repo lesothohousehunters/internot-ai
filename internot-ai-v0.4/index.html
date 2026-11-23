@@ -98,33 +98,88 @@
   <section id="view-run" class="view" aria-label="Run and walk">
     <div id="run-home">
       <h2>Run and walk</h2>
-      <div id="run-type" class="seg" role="group" aria-label="Activity"><button id="run-type-run" type="button" class="on">Run</button><button id="run-type-walk" type="button">Walk</button></div>
+      <div id="run-setup">
+        <div id="run-type" class="seg" role="group" aria-label="Activity"><button id="run-type-run" type="button" class="on">Run</button><button id="run-type-walk" type="button">Walk</button><button id="run-type-hike" type="button">Hike</button><button id="run-type-cycle" type="button">Ride</button></div>
+        <label class="run-field">Goal <select id="run-goal"><option value="none">No goal</option><option value="d3">3 km</option><option value="d5">5 km</option><option value="d10">10 km</option><option value="d21">Half marathon (21.1 km)</option><option value="d42">Marathon (42.2 km)</option><option value="t30">30 minutes</option><option value="t60">1 hour</option></select></label>
+      </div>
       <div id="run-live-stats" class="run-stats"></div>
+      <div id="run-goalbar" class="run-goal" hidden><div class="run-goal-top"><span id="run-goalbar-text"></span></div><div class="run-goalbar"><i id="run-goalbar-fill"></i></div></div>
       <canvas id="run-trace" class="run-trace" aria-label="Your route so far"></canvas>
       <p id="run-gps" class="hint" role="status"></p>
-      <div class="row wrap"><button id="run-start" type="button" class="primary run-go">Start</button><button id="run-pause" type="button" class="run-go" hidden>Pause</button><button id="run-finish" type="button" class="primary run-go" hidden>Finish</button></div>
+      <div class="row wrap"><button id="run-start" type="button" class="primary run-go">Start</button><button id="run-pause" type="button" class="run-go" hidden>Pause</button><label id="run-photo" class="button run-go" hidden>Photo<input id="run-photo-file" type="file" accept="image/*" capture="environment" hidden></label><button id="run-finish" type="button" class="primary run-go" hidden>Finish</button></div>
       <div id="run-history-box">
+        <div id="run-goals"></div>
+        <div class="row wrap run-links"><button id="run-go-records" type="button">Records and badges</button><button id="run-go-totals" type="button">Totals</button><button id="run-go-memory" type="button">Memory map</button><button id="run-go-settings" type="button">Settings</button></div>
         <h2>History</h2>
-        <p id="run-week" class="hint"></p>
-        <p id="run-empty" class="hint">No runs or walks saved yet. Press Start, then Finish when you are done.</p>
+        <p id="run-empty" class="hint">Nothing saved yet. Press Start, then Finish when you are done.</p>
         <ul id="run-list" class="list"></ul>
       </div>
     </div>
     <div id="run-detail" hidden>
-      <button id="run-d-back" type="button">‹ All runs</button>
+      <button id="run-d-back" type="button">‹ All activities</button>
       <h2 id="run-d-title"></h2>
+      <div id="run-d-awards" class="run-awards" hidden></div>
       <div id="run-d-stats" class="run-stats"></div>
       <canvas id="run-d-trace" class="run-trace" aria-label="Route"></canvas>
-      <div class="row wrap"><button id="run-d-3d" type="button" class="primary">3D replay and video</button><button id="run-d-map" type="button">Show on map</button></div>
+      <div class="row wrap"><button id="run-d-3d" type="button" class="primary">3D replay and video</button><button id="run-d-map" type="button">Show on map</button><button id="run-d-share" type="button">Share picture</button></div>
+      <h2>Photos</h2>
+      <div id="run-d-photos" class="run-photos"></div>
+      <p id="run-d-photos-empty" class="hint">No photos. Take some with the Photo button while recording, or add them here.</p>
+      <div class="row wrap"><label class="button">Add photos<input id="run-d-addphoto" type="file" accept="image/*" multiple hidden></label></div>
+      <div id="run-d-efforts"></div>
       <div id="run-d-profile-box"><h2>Height</h2><canvas id="run-d-profile" class="run-profile" aria-label="Height along the route"></canvas></div>
+      <div id="run-d-speed-box"><h2 id="run-d-speed-title">Speed (km/h)</h2><canvas id="run-d-speed" class="run-profile" aria-label="Speed along the route"></canvas></div>
       <h2>Splits</h2>
       <div id="run-d-splits" class="run-splits"></div>
+      <h2>Title and notes</h2>
+      <label class="run-field wide">Title <input id="run-d-name" type="text" maxlength="80" placeholder="For example: Morning run to Roma"></label>
+      <label class="run-field wide">Notes <textarea id="run-d-note" rows="3" maxlength="2000" placeholder="How did it feel?"></textarea></label>
       <div class="row wrap"><button id="run-d-delete" type="button" class="danger">Delete</button></div>
+    </div>
+    <div id="run-records" hidden>
+      <button id="run-r-back" type="button">‹ Back</button>
+      <div id="run-r-body"></div>
+    </div>
+    <div id="run-totals" hidden>
+      <button id="run-t-back" type="button">‹ Back</button>
+      <h2>Totals</h2>
+      <div class="seg" role="group" aria-label="Period"><button id="run-t-week" type="button" class="on">Week</button><button id="run-t-month" type="button">Month</button><button id="run-t-year" type="button">Year</button><button id="run-t-all" type="button">All</button></div>
+      <div id="run-t-body"></div>
+      <canvas id="run-t-chart" class="run-profile run-bars" aria-label="Kilometres per period"></canvas>
+    </div>
+    <div id="run-settings" hidden>
+      <button id="run-s-back" type="button">‹ Back</button>
+      <h2>You</h2>
+      <div class="row wrap"><label class="run-field">Weight (kg) <input id="run-s-weight" type="number" min="20" max="250" step="0.5" inputmode="decimal"></label><label class="run-field">Height (cm) <input id="run-s-height" type="number" min="100" max="230" step="1" inputmode="decimal"></label></div>
+      <p id="run-s-bmi" class="hint"></p>
+      <p class="hint">Weight is used to estimate calories. It stays on this phone.</p>
+      <h2>Voice coach</h2>
+      <label class="run-check"><input id="run-s-voice" type="checkbox"> Speak my progress (works with the screen off)</label>
+      <label class="run-field">Every <select id="run-s-every"><option value="500">500 m</option><option value="1000">1 km</option><option value="2000">2 km</option><option value="5000">5 km</option><option value="t300">5 minutes</option><option value="t600">10 minutes</option></select></label>
+      <label class="run-check"><input id="run-s-auto" type="checkbox"> Auto-pause when I stand still</label>
+      <h2>Goals</h2>
+      <div class="row wrap"><label class="run-field">Each week (km) <input id="run-s-week" type="number" min="0" step="1" inputmode="decimal"></label><label class="run-field">Each month (km) <input id="run-s-month" type="number" min="0" step="1" inputmode="decimal"></label></div>
+      <h2>Privacy zone</h2>
+      <p class="hint">Hide where you start and finish (for example your home) from shared videos and pictures.</p>
+      <p id="run-s-zone" class="hint"></p>
+      <div class="row wrap"><label class="run-field">Size <select id="run-s-zone-r"><option value="200">200 m</option><option value="300">300 m</option><option value="500">500 m</option><option value="1000">1 km</option></select></label></div>
+      <div class="row wrap"><button id="run-s-zone-here" type="button">Use where I am now</button><button id="run-s-zone-last" type="button">Use the start of my last activity</button><button id="run-s-zone-clear" type="button" class="danger">Turn off</button></div>
     </div>
     <div id="run-3d" class="run-3d" hidden>
       <canvas id="run-3d-canvas" aria-label="3D replay of the route"></canvas>
+      <div class="run-3d-opts">
+        <select id="run-v-shape" aria-label="Video shape"><option value="tall">Tall (stories)</option><option value="wide">Wide</option><option value="square">Square</option></select>
+        <select id="run-v-style" aria-label="Colours"><option value="orange">Orange</option><option value="blue">Blue</option><option value="green">Green</option><option value="purple">Purple</option><option value="night">Night</option></select>
+        <select id="run-v-ground" aria-label="Ground"><option value="map">Map</option><option value="satellite">Satellite</option></select>
+        <select id="run-v-length" aria-label="Length"><option value="15">15 s</option><option value="30">30 s</option><option value="60">60 s</option></select>
+      </div>
       <div class="run-3d-bar"><button id="run-3d-play" type="button">Replay</button><button id="run-3d-video" type="button" class="primary">Save video</button><button id="run-3d-close" type="button">Close</button></div>
       <p id="run-3d-note" class="hint" role="status"></p>
+    </div>
+    <div id="run-photo-view" class="run-3d" hidden>
+      <img id="run-photo-img" alt="Photo from the activity">
+      <p id="run-photo-cap" class="hint"></p>
+      <div class="run-3d-bar"><button id="run-photo-delete" type="button" class="danger">Delete photo</button><button id="run-photo-close" type="button">Close</button></div>
     </div>
   </section>
 
